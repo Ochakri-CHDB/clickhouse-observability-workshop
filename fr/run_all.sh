@@ -10,14 +10,14 @@
 #      export CH_HOST=xxxx.eu-central-1.aws.clickhouse.cloud
 #      export CH_PASSWORD='...'                  # jamais dans un fichier versionné
 #      ./run_all.sh               # tout, depuis zéro (reset compris)
-#      ./run_all.sh 05_gold       # reprise à un module (sans reset)
-#      ./run_all.sh 03_silver/02  # ou à un fichier donné
+#      ./run_all.sh 05_slo_et_alertes  # reprendre à un module (sans reset)
+#      ./run_all.sh 02_collecte/02  # ou à partir d'un fichier donné
 #      ./run_all.sh 01 04         # rattrapage : du module 01 au module 04 inclus
 # =====================================================================
 set -euo pipefail
 
-: "${CH_HOST:?Définir CH_HOST}"
-: "${CH_PASSWORD:?Définir CH_PASSWORD}"
+: "${CH_HOST:?Définissez CH_HOST}"
+: "${CH_PASSWORD:?Définissez CH_PASSWORD}"
 CH_USER="${CH_USER:-default}"
 if [ -z "${CLICKHOUSE_BIN:-}" ]; then [ -x ./clickhouse ] && CLICKHOUSE_BIN=./clickhouse || CLICKHOUSE_BIN=clickhouse; fi
 CLIENT="$CLICKHOUSE_BIN client --host $CH_HOST --secure --user $CH_USER --password $CH_PASSWORD"
@@ -26,24 +26,26 @@ STOP_AT="${2:-}"          # optionnel : s'arrêter après ce module (rattrapage 
 
 FILES=(
   reset.sql
-  00_introduction/01_premiers_pas.sql
-  01_fondamentaux/01_setup_et_inventaire.sql
-  02_bronze/01_simulateur.sql
-  02_bronze/02_ingestion_brute.sql
-  02_bronze/03_explorer_le_brut.sql
-  03_silver/01_tables_otel.sql
-  03_silver/02_pipeline_de_logs.sql
-  03_silver/03_traces_et_metriques.sql
-  04_dictionnaires/01_dictionnaires.sql
-  05_gold/01_metriques_red.sql
-  05_gold/02_slo_et_alertes.sql
-  05_gold/03_carte_des_services_et_motifs.sql
-  06_performance/01_passage_a_l_echelle.sql
-  06_performance/02_recherche_et_index.sql
-  07_investigation/01_enquete_incident.sql
-  07_investigation/02_exploitation.sql
+  00_premiers_pas/01_premiers_pas.sql
+  01_modele_de_donnees/01_inventaire_plateforme.sql
+  01_modele_de_donnees/02_schema_otel.sql
+  02_collecte/01_simulateur.sql
+  02_collecte/02_pipeline_gateway.sql
+  02_collecte/03_traces_et_metriques.sql
+  02_collecte/04_flux_en_direct.sql
+  03_recherche_et_correlation/01_sous_le_capot.sql
+  03_recherche_et_correlation/02_scenarios_de_correlation.sql
+  04_dashboards/01_agregats_red.sql
+  05_slo_et_alertes/01_burn_rate_slo.sql
+  06_enquete/01_carte_et_motifs.sql
+  06_enquete/02_incident_en_sql.sql
+  07_echelle_et_cout/01_milliard_de_lignes.sql
+  07_echelle_et_cout/02_recherche_et_index.sql
+  07_echelle_et_cout/03_agregats_retention_echantillonnage.sql
+  08_ia_et_gouvernance/01_securite_et_exploitation.sql
 )
-# Le module 08 se fait dans la console, en suivant 08_clickstack_dashboards_agent/README.md
+# Les parties ClickStack se font dans la console, en suivant le README de chaque module.
+# Le flux en direct (module 2, fichier 04) continue de tourner : arrêtez-le avec arreter_flux_en_direct.sql.
 
 mkdir -p logs
 started=0; [ -z "$START_AT" ] && started=1

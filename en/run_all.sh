@@ -10,8 +10,8 @@
 #      export CH_HOST=xxxx.eu-central-1.aws.clickhouse.cloud
 #      export CH_PASSWORD='...'                  # never in a versioned file
 #      ./run_all.sh               # everything, from scratch (reset included)
-#      ./run_all.sh 05_gold       # resume from a module (no reset)
-#      ./run_all.sh 03_silver/02  # or from a given file
+#      ./run_all.sh 05_slos       # resume from a module (no reset)
+#      ./run_all.sh 02_collection/02  # or from a given file
 #      ./run_all.sh 01 04         # catch-up: from module 01 to module 04 included
 # =====================================================================
 set -euo pipefail
@@ -26,24 +26,26 @@ STOP_AT="${2:-}"          # optional: stop after this module (catch-up "up to")
 
 FILES=(
   reset.sql
-  00_introduction/01_first_steps.sql
-  01_fundamentals/01_setup_and_inventory.sql
-  02_bronze/01_simulator.sql
-  02_bronze/02_raw_ingestion.sql
-  02_bronze/03_exploring_raw.sql
-  03_silver/01_otel_tables.sql
-  03_silver/02_log_pipeline.sql
-  03_silver/03_traces_and_metrics.sql
-  04_dictionaries/01_dictionaries.sql
-  05_gold/01_red_metrics.sql
-  05_gold/02_slo_and_alerts.sql
-  05_gold/03_service_map_and_patterns.sql
-  06_performance/01_scaling_up.sql
-  06_performance/02_search_and_indexes.sql
-  07_investigation/01_incident_investigation.sql
-  07_investigation/02_operations.sql
+  00_first_steps/01_first_steps.sql
+  01_data_model/01_platform_inventory.sql
+  01_data_model/02_otel_schema.sql
+  02_collection/01_simulator.sql
+  02_collection/02_gateway_pipeline.sql
+  02_collection/03_traces_and_metrics.sql
+  02_collection/04_live_stream.sql
+  03_search_and_correlation/01_under_the_hood.sql
+  03_search_and_correlation/02_correlation_scenarios.sql
+  04_dashboards/01_red_rollups.sql
+  05_slos_and_alerts/01_slo_burn_rate.sql
+  06_investigation/01_service_map_and_patterns.sql
+  06_investigation/02_incident_in_sql.sql
+  07_scale_and_cost/01_billion_lines.sql
+  07_scale_and_cost/02_search_and_indexes.sql
+  07_scale_and_cost/03_rollups_retention_sampling.sql
+  08_ai_and_governance/01_security_and_operations.sql
 )
-# Module 08 is done in the console, following 08_clickstack_dashboards_agent/README.md
+# The ClickStack parts are done in the console, following the README of each module.
+# The live stream (module 2 file 04) keeps running: stop it with stop_live_stream.sql.
 
 mkdir -p logs
 started=0; [ -z "$START_AT" ] && started=1

@@ -1,103 +1,98 @@
 # Résultats mesurés · Workshop observabilité ClickHouse
 
-Run de référence du 15 octobre 2026, depuis zéro (`./run_all.sh`, 8 min au total) sur le service de test :
-**ClickHouse Cloud 26.6, AWS eu-central-1, 3 répliques de 64 Go (16 vCPU chacune)**, la configuration recommandée aux participants. Les durées viennent de `system.query_log` (temps serveur). Les données sont simulées et déterministes : volumes, lignes lues et résultats sont les mêmes pour chaque participant ; les durées varient de quelques dizaines de pourcents d'un run à l'autre.
+Run de référence du 15 octobre 2026, depuis zéro (`./run_all.sh`, environ 7 min au total) sur le service de test : **ClickHouse Cloud 26.6, AWS eu-central-1, 3 répliques de 64 Go (16 vCPU chacune)**, la configuration recommandée aux participants. Les durées viennent de `system.query_log` (temps serveur). Les données sont simulées et déterministes : volumes, lignes lues et résultats sont les mêmes pour chaque participant ; les durées varient de quelques dizaines de pourcents d'un run à l'autre.
 Les mêmes chiffres figurent en commentaire (`Mesuré`) sous chaque instruction des fichiers SQL.
 
 > Ordres de grandeur pour les slides
-> - **Une journée d'une plateforme de paiement** : 1,38 M de requêtes, 14,6 M de spans, 8,1 M de lignes de log, 612 000 points de métriques, générés en SQL
-> - **910 millions de lignes de log** écrites en 4 minutes (8 lots d'environ 30 s, 114 M de lignes chacun), **9,1 Go sur disque, 11 octets par ligne** après les merges
-> - **Recherche plein texte** d'un mot rare dans 910 M de lignes : **0,46 s** avec l'index texte, 3,5 s sans (311 000 lignes lues au lieu de 910 M)
-> - **Une trace parmi 910 M de lignes** : **18 ms** avec une plage horaire, 2,7 s avec le bloom filter seul
-> - **De l'alerte à la cause racine** : 10 requêtes, chacune sous la demi-seconde
-> - **Temps moyen de détection** : 2 minutes (déploiement à 13h58, première page à 14h00)
+> - **Une journée d'une plateforme de paiement**, générée en SQL : 1,38 M de requêtes, 21,5 M de spans, 7,8 M de lignes de log, 612 000 points de métriques
+> - **La passerelle en SQL** : 8,1 M d'enregistrements d'agents parsés, enrichis et masqués par des vues matérialisées en 6 instructions de 12 à 16 s ; **0 ligne brute stockée**, 0 numéro de carte en clair, 4 % de bruit filtré
+> - **Détection** : première page (alerte qui réveille l'astreinte) à 14h00, **2 minutes** après le déploiement fautif ; résolue à 14h47
+> - **En direct** : un interrupteur rejoue l'incident sur le flux en direct, l'alerte de burn rate se déclenche **en moins d'une minute**
+> - **875 millions de lignes de log** écrites en 8 instructions de ~27 s ; un mot rare trouvé en **1 s** au lieu de 3,8 s, une trace en **31 ms** au lieu de 2,4 s
+> - **Impact métier** : 15 349 paiements en échec, **1,58 M EUR**, 7 999 marchands
 
 ---
 
-## 00 · Premiers pas
+## 01 · Modèle de données
 | Mesure | Valeur |
 |---|---|
-| 1 million de lignes de log générées, parsées avec une regex et agrégées | 364 ms |
+| Catalogue de services | 12 nœuds, 9 services, 49 pods (payment : 3 générations de 6), 11 périodes de déploiement, 20 000 marchands, 5 dictionnaires |
+| Tables OpenTelemetry | le DDL exact de l'exporteur : 5 tables de signaux, 7 index texte sur otel_logs, plus la table de recherche par trace id et sa vue |
 
-## 01 · Fondamentaux et inventaire
+## 02 · Collecte
 | Mesure | Valeur |
 |---|---|
-| Inventaire | 12 nœuds, 9 services, 49 pods (payment : 3 générations de 6), 11 périodes de déploiement, 20 000 marchands |
-| Chaque table de l'inventaire | créée et remplie en moins de 0,1 s chacune |
+| Requêtes de la journée | 1,38 M (15/s la nuit, 33/s pendant la vente flash) |
+| Passerelle : 6 insertions dans la table Null | 11,6 à 16,1 s chacune ; 8,13 M d'enregistrements reçus, 319 680 health checks écartés (3,9 %, 86 Mo) |
+| Stocké par la table d'atterrissage | 0 ligne |
+| Enrichissement (k8sattributes depuis le catalogue) | version, équipe, nœud et zone sur chaque log de conteneur |
+| Masquage PCI | 244 982 numéros de carte masqués, 0 en clair |
+| Spans (OTLP), 4 lots | 7,9 à 14,2 s chacun, 21,5 M de spans (15,6 par trace, un span Client et un span Server par appel) |
+| Métriques | 426 240 points de pods (CPU, mémoire), 103 680 points HikariCP, 53 280 points de compteur de redémarrages |
+| Flux en direct, trafic calme / panne | environ 9 000 spans et 3 000 lignes de log par minute / 28 000 spans dont 3 000 erreurs par minute |
+| Stockage de la journée | otel_traces 953 Mo (x8,7), otel_logs 351 Mo (x10,9), métriques sous 6 Mo |
 
-## 02 · Bronze
+## 03 · Recherche et corrélation
 | Mesure | Valeur |
 |---|---|
-| Requêtes générées pour la journée | 1,38 M (15/s la nuit, 33/s pendant la vente flash) |
-| Enregistrements bruts chargés, de 00h00 à 20h00 | 6 M de lignes de log de conteneurs et 354 événements Kubernetes, en 4 lots de 4,7 à 8,5 s |
-| Journée entière en bronze | 8,1 M d'enregistrements, 3,8 Go de JSON, **341 Mo sur disque (x11,5)** |
-| Numéros de carte en clair dans bronze | 179 450 lignes, toutes issues d'un pod card-network-adapter resté en DEBUG |
-| Erreurs dans le texte brut, de 14h00 à 15h00 | 18 883, contre ~50 par heure le reste de la journée |
+| Recherche plein texte sur 10 minutes (index texte) | 24 ms, 172 032 lignes lues |
+| Filtre d'attribut via l'index texte sur `ResourceAttributeItems` | 21 ms |
+| Log → trace → métriques du pod | 3 requêtes, moins de 0,6 s au total |
+| Scénario A, depuis le ticket d'un marchand (log) | 4 requêtes, de 15 à 206 ms : l'identifiant du marchand mène à `maximumPoolSize=10` sur un pod v2.4.1 |
+| Scénario B, depuis une alerte métrique (plus de 20 connexions en attente dans le pool) | déclenchée à 14h03 sur les 6 pods ; 5 requêtes de 12 à 37 ms mènent au déploiement progressif (rollout) CHG-4117 |
+| Scénario C, depuis une trace (nouveau message d'erreur) | 290 spans "connection refused" à partir de 14:21:07 ; 5 requêtes de 33 à 131 ms mènent à l'OOM kill, causé par les nouveaux essais (trafic de fraud-scoring x2,2) |
 
-## 03 · Silver
+## 04 · Dashboards (agrégats RED)
 | Mesure | Valeur |
 |---|---|
-| Backfill du pipeline de logs (2 lots) | 2,1 M de lignes en 4,9 s, 3,9 M de lignes en 7,9 s |
-| Flux continu, de 20h00 à 24h00, via 2 vues matérialisées | 2,1 M d'enregistrements bruts → 2,1 M de logs OpenTelemetry, 18,7 s pour la génération et le parsing |
-| Logs avec un trace id | 95,3 % |
-| Numéros de carte masqués | 244 982 lignes, 0 en clair dans silver |
-| Spans écrits | 14,6 M en 4 lots de 5,4 à 9,3 s (10,6 spans par trace) |
-| Histogrammes de latence tirés des spans (spanmetrics) | 23 350 points en 668 ms |
-| Gauges des pods toutes les 15 s / HikariCP / redémarrages | 426 240 / 103 680 / 53 280 points |
-| Stockage | otel_traces 662 Mo (x8,2), otel_logs 342 Mo (x9), métriques sous 6 Mo |
+| Backfill RED | 8,3 M de spans serveur → 20 160 lignes en 1,27 s |
+| Même courbe depuis l'agrégat / depuis les spans | 8 192 / 90 112 lignes lues |
+| Histogramme spanmetrics avec exemplars | 23 345 points en 751 ms |
+| p99 de POST /v1/payments | 300 ms avant 13h58, 3,1 s pendant, retour à la normale à 14h44 |
 
-## 04 · Dictionnaires
+## 05 · SLO et alertes
 | Mesure | Valeur |
 |---|---|
-| Dictionnaire de plages : changement en production à un instant donné | 2 ms |
-| Spans d'erreur de payment attribués à CHG-4117 | 37 084 (972 de plus sous CHG-4118 : pods v2.4.1 encore actifs pendant le retour arrière) |
-| Chiffre d'affaires par niveau de marchand, 941 000 paiements : dictGet / JOIN | 302 ms / 65 ms (le JOIN est plus rapide ici : 20 000 marchands seulement) |
-| Mémoire des 5 dictionnaires | 12 Mo au total (marchands), les autres sous 60 Ko |
+| Burn rate, fenêtre de 1 h, au pic | plus de 400 fois le rythme permis |
+| Alertes de la journée | 11 événements : première page à 14h00, pression mémoire sur un nœud à 14h19, redémarrage OOM à 14h22, résolution à 14h47 |
+| Interrupteur de panne sur le flux en direct | burn rate de 450x dès la première minute, page fast-burn en moins d'une minute, alerte p99 au bout de 3 minutes |
 
-## 05 · Gold
+## 06 · Enquête
 | Mesure | Valeur |
 |---|---|
-| Backfill RED | 8,3 M de spans serveur → 20 165 lignes en 1,25 s |
-| p99 de POST /v1/payments | 300 ms avant 13h58, 3,1 s pendant, revenu à la normale à 14h44 |
-| Taux d'erreur de POST /v1/payments | 0,15 % avant, jusqu'à 31,8 % à 14h15 |
-| Taux de consommation (burn rate), fenêtre de 1 h, au pic | plus de 400 fois le rythme permis |
-| Alertes | 11 événements : première page à 14h00 (2 minutes après le déploiement), pression mémoire sur le nœud 14h19, redémarrage OOM 14h22, résolu 14h47 |
-| Service map | 16 arcs reconstruits depuis les traces ; payment → postgres p95 7,7 ms avant, 3 033 ms pendant |
-| Patterns de logs | 8 308 patterns sur 6,7 M de lignes ; le premier nouveau pattern de l'incident est le timeout HikariPool (18 011 fois, 0 avant) |
+| Service map | 16 arêtes tirées des traces ; payment → postgres p95 de 7,7 ms avant, 3 033 ms pendant |
+| Motifs de logs | 31 motifs pour 6,4 M de lignes ; le premier des nouveaux est le timeout HikariPool (18 011 fois, 0 avant) |
+| Les 10 questions | 3 à 379 ms chacune |
+| Cause racine | `INSERT payflow.payments`, timeout HikariPool, uniquement sur les pods v2.4.1 (CHG-4117) |
+| Impact métier, de 13h58 à 14h50 | **15 349 paiements en échec, 1 576 893 EUR, 7 999 marchands** |
 
-## 06 · Performance (910 millions de lignes de log)
+## 07 · Échelle et coût (875 millions de lignes de log)
 | Mesure | Valeur |
 |---|---|
-| Écriture, 8 lots de 114 M de lignes | 27,9 à 31,2 s par lot, environ 4 min au total, ~10 Go de mémoire par lot |
-| Stockage après les merges | 108 Go bruts → **9,1 Go, x11,8, 11 octets par ligne** |
+| Écriture, 8 lots de 109 M de lignes | 26,4 à 29,5 s chacun, environ 3,5 min au total, ~10,5 Go de mémoire par lot |
+| Stockage | 106 Go bruts → 13 Go juste après les insertions (x8,2, 16 octets par ligne) ; les fusions en arrière-plan continuent de compresser |
 
-| Requête | Sans | Avec | Lignes lues sans → avec |
+| Requête (service au repos) | Sans | Avec | Lignes lues |
 |---|---|---|---|
-| Mot rare, index texte | 3,45 s | **461 ms** | 910 M → 311 296 |
-| Mot fréquent (HikariPool), index texte | 2,97 s | **333 ms** | 910 M → 9,5 M |
-| Un trace id, bloom filter seul / avec une plage horaire | 2,73 s | **18 ms** | 1,8 M → 835 584 |
-| Erreurs par minute, projection | 890 ms | **115 ms** | 910 M → 593 063 |
-| Trace entière via la table de correspondance des trace ids | | **28 ms** | 188 416 |
-| Agrégation regex lourde, cache de requêtes | 6,89 s | **1 ms** | 910 M → 0 |
-| Même filtre relancé, query condition cache | 1,71 s | **13 ms** | 593 M → 540 672 |
-| Scan complet, 3 répliques (parallel replicas) | 6,8 s | **3,77 s** (x1,8) | 910 M (répartis sur 3) |
+| Mot rare, index texte | 3,81 s | **1,05 s** | 875 M → 606 208 |
+| Mot fréquent (HikariPool), index texte | 2,41 s | **678 ms** | 875 M → 10,3 M |
+| Un trace id, bloom filter seul / avec une plage horaire | 2,38 s | **31 ms** | 1,9 M → 1 M |
+| Erreurs par minute, projection | 549 ms | **341 ms** | 875 M → 578 256 |
+| Trace complète via la table de recherche | | **526 ms** | 245 760 |
+| Agrégation lourde par regex, cache de requêtes | 5,13 s | **1 ms** | 875 M → 0 |
+| Même filtre à nouveau, query condition cache | 2,37 s | **19 ms** | 875 M → 1,1 M |
+| Scan complet, 3 répliques | 5,12 s | **2,11 s** (x2,4) | 875 M |
 
-Mesuré sur un service au repos. Lancées juste après les 8 lots, pendant que les merges tournent encore, les mêmes requêtes sont 2 à 3 fois plus lentes et les parallel replicas apportent peu : laissez quelques minutes au service après l'étape 2 du module 6.
+| Levier | Valeur |
+|---|---|
+| Agrégat (rollup) dans la convention de ClickStack | 21,5 M de spans → 53 926 lignes (399 spans par ligne), construit en 2,7 s |
+| Échantillonnage à la rétention (erreurs et traces de plus de 1 s) | 602 753 spans gardés, 2,8 % de la journée, toutes les traces de l'incident |
+| Échantillonnage en tête à 10 % | le taux d'erreur est préservé, les traces rares ne le sont pas |
+| Règle de dimensionnement | 12 Go de télémétrie brute par jour = 0,01 vCPU d'ingestion |
 
-## 07 · Enquête et exploitation
+## 08 · IA et gouvernance
 | Mesure | Valeur |
 |---|---|
-| Les 10 questions de l'enquête | 3 à 414 ms chacune |
-| Cause racine | `INSERT payflow.payments`, timeout HikariPool, uniquement sur les pods v2.4.1 (26,5 % d'erreurs) contre 0 sur les pods v2.4.0 au même moment |
-| HikariCP pendant l'incident | pool de 10, 10 actives, 45 à 49 threads en attente (v2.4.0 : pool de 50, ~4 actives, 0 en attente) |
-| Impact métier, de 13h58 à 14h50 | **15 349 paiements en échec, 1,58 M EUR, 7 999 marchands** |
-| Chronologie | déploiement 13h58, première erreur 13:58:03, page 14h00, OOM 14:21:07, retour arrière 14h42, dernière erreur 14:43:39, résolu 14h47 |
-| Rejeu de la journée depuis bronze, puis REPLACE PARTITION | 8,1 M de lignes reconstruites en 15,6 s, comptes identiques par sévérité, échange atomique |
-| Suppression RGPD d'un marchand (DELETE léger) | 1 017 lignes, 3 à 38 s selon la charge |
-
-## 08 · ClickStack, dashboards, API, agents
-| Mesure | Valeur |
-|---|---|
-| Tuiles de dashboard sur gold | quelques millisecondes, quelques milliers de lignes lues |
+| Suppression RGPD d'un marchand (lightweight DELETE) | 1 017 lignes, environ 1 s |
+| Row policies par équipe | 2 policies, appliquées de la même façon à ClickStack, à la console SQL et au MCP |
 | API de statut (vue paramétrée sur slo_burn) | 11 lignes pour 10 minutes, quelques ms |
-| ClickStack | lit directement `payflow_otel`, sources déduites du schéma OpenTelemetry |
