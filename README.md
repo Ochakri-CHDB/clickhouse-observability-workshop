@@ -2,13 +2,13 @@
 
 A 5-hour hands-on workshop on **your own ClickHouse Cloud service**: Black Friday on PayFlow, a payment platform on Kubernetes, and the incident that hits it at 13:58. You collect logs, traces, metrics and Kubernetes events, model them in the OpenTelemetry schema, build SLOs and alerts, find the root cause in SQL, then replay the investigation in ClickStack and with ClickHouse Agents.
 
-Everything is simulated in SQL and deterministic: no collector, no load generator, nothing to install. Everyone gets the same numbers.
+Everything is simulated in SQL and deterministic: no collector, no load generator, nothing to install. Everyone gets the same numbers. The three language versions run the same SQL (OpenTelemetry names are English by standard); comments, documentation and file names are translated.
 
 | | Language | Start here |
 |---|---|---|
 | EN | English | [en/README.md](en/README.md) |
-| FR | Français | coming soon |
-| ES | Español | coming soon |
+| FR | Français | [fr/README.md](fr/README.md) |
+| ES | Español | [es/README.md](es/README.md) |
 
 What you will see:
 - the OpenTelemetry tables of the ClickHouse exporter, read by **ClickStack** as is
@@ -21,7 +21,7 @@ What you will see:
 Quick start, from the folder of your language:
 
 ```bash
-cd en
+cd en    # or fr, es
 export CH_HOST=xxxx.eu-central-1.aws.clickhouse.cloud
 export CH_PASSWORD='...'
 ./run_all.sh
