@@ -1,0 +1,4 @@
+logs/
+*.zip
+.env
+.DS_Store
