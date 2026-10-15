@@ -1,24 +1,26 @@
 -- =====================================================================
---  RESET · Elimina todo lo que creó el taller, y nada más
+--  RESET · Borra todo lo que creó el taller, y nada más
 -- =====================================================================
---  Solo los objetos llamados payflow_* (bases de datos, usuario, roles, políticas)
---  y las funciones SQL pf_*. Las demás bases de datos del servicio no se tocan.
+--  Solo los objetos llamados payflow_* (bases de datos, usuario, roles, policies) y
+--  las funciones SQL pf_*. Las vistas del flujo en directo viven en payflow_sim:
+--  borrarla las detiene. Las demás bases de datos del servicio no se tocan.
 
--- Las row policies y los roles sobreviven a DROP DATABASE: se eliminan primero
+-- Las row policies y los roles sobreviven a DROP DATABASE: se borran primero
 DROP ROW POLICY IF EXISTS pf_payments_logs ON payflow_otel.otel_logs;
 DROP ROW POLICY IF EXISTS pf_payments_traces ON payflow_otel.otel_traces;
 DROP ROLE IF EXISTS payflow_team_payments;
 DROP ROLE IF EXISTS payflow_agent_role;
 DROP SETTINGS PROFILE IF EXISTS payflow_agent_profile;
 
--- Sin SYNC: la tabla de mil millones de líneas del módulo 6 tarda minutos en borrarse
--- del almacenamiento de objetos. Sin SYNC, el DROP vuelve al instante y los ficheros
--- se borran en segundo plano; las bases de datos se pueden volver a crear enseguida.
+-- Sin SYNC: la tabla de mil millones de líneas del módulo 7 tarda minutos en borrarse
+-- del almacenamiento de objetos. Sin SYNC el DROP vuelve al instante y los ficheros se
+-- borran en segundo plano; las bases de datos se pueden volver a crear enseguida.
+-- payflow_sim primero: contiene las vistas del flujo en directo que escriben en las demás
+DROP DATABASE IF EXISTS payflow_sim;
 DROP DATABASE IF EXISTS payflow_sre;
 DROP DATABASE IF EXISTS payflow_otel;
-DROP DATABASE IF EXISTS payflow_raw;
-DROP DATABASE IF EXISTS payflow_sim;
-DROP DATABASE IF EXISTS payflow_ref;
+DROP DATABASE IF EXISTS payflow_ingest;
+DROP DATABASE IF EXISTS payflow_inventory;
 DROP USER IF EXISTS payflow_dict;
 
 DROP FUNCTION IF EXISTS pf_r;
@@ -40,3 +42,6 @@ DROP FUNCTION IF EXISTS pf_log_scope;
 DROP FUNCTION IF EXISTS pf_log_attributes;
 DROP FUNCTION IF EXISTS pf_mask_pan;
 DROP FUNCTION IF EXISTS pf_log_pattern;
+DROP FUNCTION IF EXISTS pf_pod_from_path;
+DROP FUNCTION IF EXISTS pf_k8s_resource;
+DROP FUNCTION IF EXISTS pf_is_health_check;

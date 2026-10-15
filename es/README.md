@@ -1,127 +1,110 @@
-# ClickHouse de cero a avanzado · Workshop de observabilidad
+# ClickHouse de cero a avanzado · Taller de observabilidad
 
-Black Friday en **PayFlow**, una plataforma de pagos que corre sobre Kubernetes. A las 13:58 una release reduce el pool de conexiones a la base de datos de 50 a 10. Los pagos empiezan a fallar, los reintentos se acumulan y un pod muere por falta de memoria. Vas a recoger, modelar y consultar todas las señales de ese día en **tu propio servicio ClickHouse Cloud**, y después llevar la investigación en SQL y en ClickStack, la interfaz de observabilidad de ClickHouse.
+Black Friday en **PayFlow**, una plataforma de pagos que corre sobre Kubernetes. A las 13:58 una nueva versión reduce el pool de conexiones a la base de datos de 50 a 10. Los pagos empiezan a fallar, los reintentos se acumulan, un pod muere por falta de memoria. Recoges todas las señales de ese día en **tu propio servicio ClickHouse Cloud**, las exploras en **ClickStack** (búsqueda, dashboards, alertas, mapa de servicios, event patterns, AI notebooks) y ves por debajo, en SQL, cómo funciona cada funcionalidad.
 
-Logs, trazas, métricas y eventos de Kubernetes están **simulados en SQL** (sin collector, sin generador de carga, nada que instalar) y son deterministas: todo el mundo obtiene las mismas cifras. Siguen exactamente el esquema OpenTelemetry, así que ClickStack los lee como si los hubiera escrito un collector real.
-
-```
- logs de contenedor ──► bronze ──MV──► silver (OpenTelemetry) ──MV / vistas refrescables──► gold ──► ClickStack
- eventos k8s           JSON bruto     otel_logs, otel_traces,      RED, burn rate del SLO,          dashboards
- trazas, métricas      (intacto)      otel_metrics_*               alertas, mapa de servicios       API, agente IA
-```
+Logs, trazas, métricas y eventos de Kubernetes están **simulados en SQL**: sin colector, sin generador de carga, nada que instalar. Siguen exactamente el esquema OpenTelemetry del exportador de ClickHouse, así que ClickStack los lee como si los hubiera escrito un colector real. Todo es determinista: todo el mundo obtiene las mismas cifras. Un flujo en directo reproduce tráfico cada minuto, y un interruptor te permite romper producción a propósito.
 
 ---
 
-## La arquitectura del workshop
+## La arquitectura: el recorrido de la telemetría
 
-Cada flecha es SQL que se ejecuta dentro de ClickHouse. Flecha continua: vista materializada incremental, disparada por cada INSERT. Flecha punteada: vista materializada refrescable, recalculada según una programación.
+El taller sigue el recorrido de la telemetría real, con el vocabulario del colector OpenTelemetry y de ClickStack. Lo que un colector haría en el borde, aquí lo hace la pasarela (gateway) dentro de ClickHouse, con vistas materializadas: el enfoque que recomienda la documentación de ClickHouse para el procesamiento pesado.
 
 ```mermaid
 flowchart LR
-    subgraph SIM["Simulador (payflow_sim)"]
-        REQ["peticiones<br/>1,4 M al día"]
-        SPANS["spans<br/>14,6 M"]
-        LINES["líneas de log<br/>nginx, Go, Java, Python"]
-        EVT["eventos de Kubernetes"]
+    subgraph APPS["Aplicaciones y agentes (payflow_sim)"]
+        SDK["9 servicios<br/>OpenTelemetry SDK"]
+        AGENT["agentes de nodo<br/>filelog, k8sobjects, kubeletstats"]
+        LIVE["flujo en directo<br/>1 min cada minuto, interruptor de caos"]
     end
-    subgraph REF["Inventario (payflow_ref)"]
-        INV["nodos, servicios, pods,<br/>despliegues, comercios"]
-        DICT["5 diccionarios"]
+    subgraph GW["Pasarela (payflow_ingest)"]
+        NULL["agent_records<br/>ENGINE = Null"]
+        PROC["vistas materializadas<br/>filter, transform, k8sattributes,<br/>redaction, routing, count"]
     end
-    subgraph BRONZE["Bronze (payflow_raw)"]
-        RAW["log_records<br/>JSON bruto, compresión x12"]
-    end
-    subgraph SILVER["Silver (payflow_otel)"]
-        LOGS["otel_logs<br/>parseados, números de tarjeta enmascarados"]
-        TRACES["otel_traces"]
+    subgraph OTEL["Tablas OpenTelemetry (payflow_otel)"]
+        LOGS["otel_logs"]
+        TRACES["otel_traces<br/>+ búsqueda por trace id"]
         METRICS["otel_metrics_gauge / sum / histogram"]
-        XL["logs_xl<br/>910 M de líneas"]
     end
-    subgraph GOLD["Gold (payflow_sre)"]
-        RED["red_1m<br/>RED por minuto"]
-        SLO["slo_burn"]
-        ALERTS["alerts"]
-        MAP["service_map_5m"]
-        PAT["log_patterns_10m"]
+    subgraph SRE["Conectores y alertas (payflow_sre)"]
+        RED["red_1m<br/>spanmetrics"]
+        SLO["slo_burn, alerts"]
+        MAP["mapa de servicios, patrones de logs"]
     end
-    subgraph USE["Usos"]
-        CS["ClickStack<br/>búsqueda, trazas, gráficos"]
-        DASH["dashboard"]
-        API["API de estado"]
-        AGENT["ClickHouse Agents"]
+    subgraph INV["Catálogo de servicios (payflow_inventory)"]
+        CAT["nodos, servicios, pods,<br/>despliegues, comercios"]
     end
-    LINES --> RAW
-    EVT --> RAW
-    RAW -->|"2 MV: parsear, enmascarar"| LOGS
-    SPANS --> TRACES
-    TRACES -->|"spanmetrics"| METRICS
-    TRACES -->|MV| RED
+    subgraph CS["ClickStack"]
+        UI["search, live tail, trazas,<br/>dashboards, alerts, service map,<br/>event patterns y deltas, notebooks"]
+    end
+    AGENT -->|"logs de contenedores, eventos"| NULL
+    NULL --> PROC
+    PROC --> LOGS
+    SDK -->|"OTLP"| TRACES
+    SDK -->|"OTLP"| METRICS
+    CAT -.->|"diccionarios"| PROC
+    TRACES -->|"MV"| RED
     RED -.->|"cada minuto"| SLO
-    SLO -.->|"DEPENDS ON"| ALERTS
     TRACES -.-> MAP
-    LOGS -.-> PAT
-    LOGS --> XL
-    INV --> DICT
-    DICT -.-> LOGS
-    LOGS --> CS
-    TRACES --> CS
-    METRICS --> CS
-    GOLD --> DASH
-    SLO --> API
-    GOLD --> AGENT
+    LIVE --> LOGS
+    LIVE --> TRACES
+    LOGS --> UI
+    TRACES --> UI
+    METRICS --> UI
+    SRE --> UI
 ```
 
-| Capa | Tablas | Qué muestra |
+| Base de datos | Papel | Tablas |
 |---|---|---|
-| **Inventario** | `payflow_ref.*`: 12 nodos, 9 servicios, 49 pods, el historial de despliegues, 20 000 comercios | el contexto con el que se cruza cada señal |
-| **Bronze** | `payflow_raw.log_records` | las líneas de log brutas de los contenedores y los eventos de Kubernetes, intactos, tal como los envían los agentes |
-| **Silver** | `otel_logs`, `otel_traces`, `otel_metrics_gauge`, `otel_metrics_sum`, `otel_metrics_histogram` | el esquema del exporter OpenTelemetry; logs parseados desde 4 formatos, números de tarjeta enmascarados |
-| **Gold** | `red_1m`, `slo_burn`, `alerts`, `service_map_5m`, `log_patterns_10m` | lo que vigila un SRE, unos pocos MB para todo el día |
-| **Usos** | ClickStack, dashboard de la consola SQL, Query API endpoint, ClickHouse Agents | todo lee ClickHouse directamente |
+| `payflow_sim` | las aplicaciones y sus agentes, simulados en SQL; el flujo en directo | vistas, el interruptor de caos |
+| `payflow_ingest` | la tabla de aterrizaje de la pasarela del colector (no almacena nada) | `agent_records` |
+| `payflow_otel` | lo que escribe el exportador de ClickHouse: las fuentes de ClickStack | `otel_logs`, `otel_traces`, `otel_metrics_*`, búsqueda por traza, agregados (rollups) |
+| `payflow_sre` | lo que calculan los conectores y las alertas | `red_1m`, `slo_burn`, `alerts`, `service_map_5m`, `log_patterns_10m`, `log_volume_1m` |
+| `payflow_inventory` | el catálogo de servicios, cargado en memoria como diccionarios | `node`, `service`, `pod`, `deployment_history`, `merchant` |
 
 ---
 
-## Antes de la sesión (20 min, la víspera)
+## Antes de la sesión (20 min, el día anterior)
 
-1. **Crea tu cuenta de ClickHouse Cloud** en [clickhouse.cloud](https://clickhouse.cloud). Recibes 300 $ de créditos, mucho más de lo que necesita el día.
+1. **Crea tu cuenta de ClickHouse Cloud** en [clickhouse.cloud](https://clickhouse.cloud). Recibes 300 $ de créditos, mucho más de lo que necesita la jornada.
 2. **Crea un servicio** con esta configuración:
 
    | Parámetro | Valor | Por qué |
    |---|---|---|
    | Región | AWS **eu-central-1** (o la más cercana a ti) | |
-   | Réplicas | **3** | los scans grandes se reparten entre las 3 (módulo 6) |
-   | Memoria por réplica | **64 GB** (16 vCPU), **mínimo = máximo** | tamaño fijo: no hay que esperar al autoscaling en mitad de una demo |
-   | Idling (reposo) | **tras 1 hora** de inactividad como mínimo | el servicio no se duerme durante una pausa |
+   | Réplicas | **3** | los grandes escaneos se reparten entre las 3 (módulo 7) |
+   | Memoria por réplica | **64 GB** (16 vCPU), **mínimo = máximo** | tamaño fijo: sin esperar al autoescalado durante una demo |
+   | Reposo (idling) | **tras 1 hora** de inactividad, como mínimo | el servicio no se duerme durante una pausa |
 
-   Coste orientativo: unos 11 $ por hora como máximo con este tamaño, menos de 70 $ el día. La calculadora de [clickhouse.com/pricing](https://clickhouse.com/pricing) da la tarifa exacta.
-3. **Abre la consola SQL** del servicio y ejecuta `SELECT version()`.
+   Coste orientativo: unos 11 $ por hora como máximo con este tamaño, menos de 70 $ la jornada. La calculadora de [clickhouse.com/pricing](https://clickhouse.com/pricing) da la tarifa exacta.
+3. **Abre la consola SQL** del servicio y ejecuta `SELECT version()`. Después abre una vez **ClickStack** desde el menú de la izquierda, para comprobar que está disponible en tu servicio.
 4. Opcional, para ponerte al día desde la línea de comandos: instala el cliente nativo (`curl https://clickhouse.com/ | sh`).
 
-Cada fichero SQL se ejecuta en la consola SQL, instrucción a instrucción o todo de una vez. Ninguna instrucción pasa de 60 segundos. Cada fichero termina con un checkpoint que debe mostrar `OK` en todas partes.
+Cada archivo SQL se ejecuta en la consola SQL, instrucción por instrucción o todo de una vez. Ninguna instrucción pasa de 60 segundos. Cada archivo termina con un checkpoint que debe mostrar `OK` en todas partes. Cada módulo con una parte en ClickStack tiene un README con los pasos en la interfaz.
 
 ---
 
 ## Programa (5 horas)
 
-| Hora | Módulo | Contenido | Duración |
-|---|---|---|---|
-| 0:00 | **00** Primeros pasos | un millón de líneas de log generadas, parseadas y agregadas en una sola consulta | 10 min |
-| 0:10 | **01** Fundamentos | MergeTree, ORDER BY, LowCardinality; el inventario: nodos, servicios, pods, despliegues, comercios | 25 min |
-| 0:35 | **02** Bronze | el simulador SQL, 6 millones de líneas de log brutas en 25 s, exploración del JSON, un problema PCI | 35 min |
-| 1:10 | **03** Silver | las tablas OpenTelemetry, el pipeline de logs (4 formatos, severidad, trace ids, enmascarado de tarjetas), trazas, métricas | 40 min |
-| 1:50 | pausa | | 10 min |
-| 2:00 | **04** Diccionarios | equipo, nodo, comercio, y "qué cambio estaba activo en ese momento" | 20 min |
-| 2:20 | **05** Gold | métricas RED, tasa de consumo (burn rate) del SLO, alertas, mapa de servicios a partir de las trazas, patrones de logs | 35 min |
-| 2:55 | **06** Rendimiento | 910 M de líneas de log: índice de texto, bloom filter, proyección, cachés de consultas, 3 réplicas | 30 min |
-| 3:25 | pausa | | 10 min |
-| 3:35 | **07** Investigación | del aviso (page) a la causa raíz en 10 consultas, el coste del incidente, reproceso, RGPD, seguridad | 40 min |
-| 4:15 | **08** ClickStack y agentes | la misma investigación en ClickStack, un dashboard, una API de estado, ClickHouse Agents | 45 min |
+| Hora | Módulo | ClickStack | El SQL por debajo | Duración |
+|---|---|---|---|---|
+| 0:00 | **00** Primeros pasos | | un millón de líneas de log generadas, parseadas y agregadas en una consulta | 10 min |
+| 0:10 | **01** Modelo de datos | | el catálogo de servicios y sus diccionarios; las tablas OpenTelemetry, tal como las crea el exportador | 25 min |
+| 0:35 | **02** Recolección | | las aplicaciones y los agentes, la pasarela (tabla Null y procesadores como vistas: parseo, enriquecimiento, enmascarado de tarjetas, filtro, conteo), trazas y métricas OTLP, el flujo en directo | 40 min |
+| 1:15 | **03** Búsqueda y correlación | sources, búsqueda Lucene y SQL, saved search, live tail, del log a la traza y al pod; tres investigaciones, desde un log, una alerta de métrica, una traza | los índices de texto, EXPLAIN, los tres escenarios en SQL | 45 min |
+| 2:00 | pausa | | | 10 min |
+| 2:10 | **04** Dashboards | Chart Explorer, un dashboard con filtros, release markers, drilldown al hacer clic en una fila, tiles SQL, presets, text-to-chart | agregados RED (spanmetrics), el histograma de latencia con exemplars | 35 min |
+| 2:45 | **05** SLO y alertas | alertas de búsqueda, de gráfico y SQL, un webhook; **rompe producción y recibe el aviso** | presupuesto de errores, tasa de consumo (burn rate), alertas multiventana | 30 min |
+| 3:15 | **06** Investigación | service map, event patterns, event deltas, release markers, Infrastructure tab | las 10 preguntas, la traza como árbol, el coste del incidente | 40 min |
+| 3:55 | pausa | | | 10 min |
+| 4:05 | **07** Escala y coste | un agregado (rollup) registrado en la source | 875 M de líneas de log: índice de texto, bloom filter, proyección, cachés, 3 réplicas; retención, muestreo, dimensionamiento | 35 min |
+| 4:40 | **08** IA y gobernanza | AI notebooks, MCP, RBAC | ClickHouse Agents, row policies, borrado RGPD, una API de estado | 20 min |
 
 ---
 
 ## Ponerse al día
 
-¿Te has quedado atrás o ha fallado un módulo? El script `run_all.sh` vuelve a ejecutar los ficheros con el cliente nativo, desde tu máquina, en la carpeta `es/`:
+¿Te has quedado atrás o ha fallado un módulo? El script `run_all.sh` vuelve a ejecutar los archivos SQL con el cliente nativo, desde tu máquina, en la carpeta `es/`:
 
 ```bash
 cd es
@@ -135,16 +118,16 @@ export CH_PASSWORD='<contraseña>'
 Vuelve a ejecutar los módulos 01 a 04, sin reset.
 
 ```bash
-./run_all.sh 05_gold
+./run_all.sh 05_slo
 ```
-Reanuda desde un módulo hasta el final.
+Retoma desde un módulo hasta el final.
 
 ```bash
 ./run_all.sh
 ```
 Todo desde cero, reset incluido: unos 10 minutos.
 
-`reset.sql` solo elimina lo que ha creado el workshop: las bases `payflow_*`, el usuario y los roles, y las funciones `pf_*`.
+Al final de la jornada, ejecuta `detener_flujo_en_directo.sql`: el flujo en directo se refresca cada minuto y mantiene el servicio despierto. `reset.sql` borra solo lo que ha creado el taller: las bases de datos `payflow_*`, el usuario y los roles, y las funciones `pf_*`.
 
 ---
 
@@ -152,46 +135,46 @@ Todo desde cero, reset incluido: unos 10 minutos.
 
 | Término | Significado | Término | Significado |
 |---|---|---|---|
-| **Log** | una línea con marca de tiempo escrita por un programa | **Span** | una operación de una petición (una llamada HTTP, una consulta), con un inicio y una duración |
-| **Traza** | el árbol de spans de una petición, a través de los servicios | **TraceId / SpanId** | los identificadores que enlazan logs y spans |
-| **Métrica** | un número medido a lo largo del tiempo: gauge (un valor), sum (un contador), histogram (una distribución) | **OpenTelemetry (OTel)** | el estándar abierto para logs, trazas y métricas |
-| **RED** | Rate, Errors, Duration: las tres cifras de un servicio | **SLO** | objetivo de nivel de servicio, p. ej. el 99,95 % de los pagos tienen éxito |
-| **Presupuesto de errores** | los errores que permite el SLO (aquí el 0,05 %) | **Tasa de consumo (burn rate)** | lo rápido que se gasta el presupuesto; 14,4 = el presupuesto de un mes en 2 días |
-| **Exemplar** | el trace id que se guarda con un punto de métrica, para saltar de un gráfico a una traza | **Mapa de servicios** | quién llama a quién, reconstruido a partir de los spans padre e hijo |
-| **ClickStack** | el stack de observabilidad de ClickHouse: ClickHouse, collector OpenTelemetry, interfaz HyperDX | **HyperDX** | la interfaz de ClickStack: búsqueda, trazas, dashboards, alertas |
-| **Pod / nodo** | un grupo de contenedores en ejecución / la máquina que lo aloja | **Rollout / rollback** | despliegue progresivo: sustituir los pods por una nueva versión / marcha atrás: volver a la anterior |
-| **OOMKilled** | matado por el kernel por usar más memoria de la permitida | **HikariCP** | el pool de conexiones Java a la base de datos; su tamaño es aquí la causa raíz |
-| **PAN** | primary account number: el número de tarjeta, que nunca debe aparecer en claro en un log (PCI DSS) | **MV / RMV** | vista materializada incremental / vista materializada refrescable |
-| **Índice de texto** | un índice de las palabras de una columna, para la búsqueda de texto completo | **Bloom filter** | un índice compacto que dice "seguro que no está en este gránulo" |
-| **Proyección** | una segunda copia de una tabla, preordenada o preagregada, que se elige automáticamente | **Gránulo** | la unidad que lee ClickHouse: 8 192 filas |
+| **Señal** | un tipo de telemetría: logs, trazas, métricas (y sesiones en ClickStack) | **Wide event** | un registro rico con muchos atributos (eventos enriquecidos), alta cardinalidad permitida |
+| **Resource / atributos** | quién lo emitió (servicio, pod, nodo) / los detalles del evento | **Span / traza** | una operación de una petición / el árbol de spans de una petición |
+| **Colector** | el agente o la pasarela OpenTelemetry: receptores, procesadores, exportadores, conectores | **Agente / pasarela** | un colector en cada nodo / un colector central que procesa y exporta |
+| **Procesador** | una etapa del colector: filter, transform, k8sattributes, redaction, batch | **Conector** | convierte una señal en otra: spanmetrics (RED), servicegraph, count |
+| **ClickStack** | el stack de observabilidad de ClickHouse: ClickHouse, el colector, la interfaz HyperDX | **Source** | en ClickStack, una tabla declarada como logs, trazas o métricas |
+| **RED** | Rate, Errors, Duration: las tres cifras de un servicio | **SLO / presupuesto de errores** | el 99,95 % de los pagos tiene éxito / el 0,05 % de errores permitido |
+| **Burn rate** | la velocidad a la que se gasta el presupuesto; 14,4 = el presupuesto de un mes en 2 días | **Exemplar** | el trace id guardado con un punto de métrica, para saltar de un gráfico a una traza |
+| **Event patterns / deltas** | líneas de log agrupadas en mensajes / lo que distingue a los spans lentos | **Release marker** | la línea de un gráfico donde aparece por primera vez una nueva versión |
+| **HikariCP** | el pool de conexiones a base de datos de Java; su tamaño es aquí la causa raíz | **OOMKilled** | matado por el kernel por usar más memoria de la permitida |
+| **PAN** | el número de tarjeta, que nunca debe almacenarse en claro (PCI DSS) | **Motor Null** | una tabla que no almacena nada; sus vistas materializadas ven cada inserción |
+| **MV / RMV** | vista materializada incremental / vista materializada refrescable | **Índice de texto / bloom filter** | un índice de las palabras de una columna / "seguro que no está en este gránulo" |
 
 ---
 
 ## Contenido del repositorio
 
 ```
-00_introduccion/                 primeros pasos
-01_fundamentos/                  bases de datos, MergeTree, el inventario de la plataforma
-02_bronze/                       el simulador SQL, ingesta bruta, exploración del JSON
-03_silver/                       tablas OpenTelemetry, pipeline de logs, trazas y métricas
-04_diccionarios/                 enriquecimiento en memoria, "qué cambio estaba activo"
-05_gold/                         RED, SLO y alertas, mapa de servicios y patrones de logs
-06_rendimiento/                  mil millones de líneas de log, índices, proyecciones, réplicas
-07_investigacion/                el incidente, paso a paso; operación
-08_clickstack_dashboards_agente/ README paso a paso: ClickStack, dashboard, API, agente (sin fichero SQL)
-run_all.sh, reset.sql            ejecución completa y limpieza
-RESULTADOS.md                    cifras medidas en el servicio de prueba, módulo a módulo
+00_primeros_pasos/            un millón de líneas de log en una consulta
+01_modelo_de_datos/           el catálogo de servicios y sus diccionarios, las tablas OpenTelemetry
+02_recoleccion/               simulador, pipeline de la pasarela, trazas y métricas OTLP, flujo en directo
+03_busqueda_y_correlacion/    búsqueda en ClickStack, tres escenarios de correlación (README) y el SQL por debajo
+04_dashboards/                dashboards de ClickStack (README) y los agregados RED
+05_slo_y_alertas/             alertas de ClickStack y el interruptor de caos (README), burn rate del SLO en SQL
+06_investigacion/             el incidente en ClickStack (README), mapa de servicios, patrones, 10 preguntas
+07_escala_y_coste/            mil millones de líneas de log, índices y cachés, agregados, retención, muestreo
+08_ia_y_gobernanza/           AI notebooks, MCP, ClickHouse Agents, RBAC, API de estado (README); permisos y RGPD
+run_all.sh, reset.sql         ejecución completa y limpieza
+detener_flujo_en_directo.sql  detener el flujo en directo al final de la jornada
+RESULTADOS.md                 cifras medidas en el servicio de prueba, módulo a módulo
 ```
 
-## Buenas prácticas de ClickHouse ilustradas
+## Buenas prácticas ilustradas
 
 | Regla | Dónde |
 |---|---|
-| Elegir el ORDER BY a partir de los filtros más frecuentes (`schema-pk-plan-before-creation`) | módulos 1, 3 |
-| LowCardinality para las cadenas repetidas, sin Nullable | módulos 1, 3 |
-| Vistas materializadas incrementales para la ingesta y los agregados (`mv-incremental`) | módulos 3, 5 |
-| Vistas materializadas refrescables para ventanas y joins, `DEPENDS ON`, `SYSTEM WAIT VIEW` | módulo 5 |
-| Diccionarios en lugar de joins para enriquecer (`query-join-use-dictionaries`) | módulo 4 |
-| Índices de salto (texto, bloom filter) y proyecciones declarados en el CREATE | módulo 6 |
-| DELETE ligero y operaciones de partición en lugar de mutaciones | módulo 7 |
+| Usar el esquema del exportador: ClickStack lo lee tal cual | módulo 1 |
+| Procesamiento pesado en la base de datos: tabla Null y vistas materializadas | módulo 2 |
+| Diccionarios para el enriquecimiento (`query-join-use-dictionaries`) | módulos 1, 2, 6 |
+| Vistas materializadas incrementales para los agregados (`mv-incremental`); vistas refrescables para ventanas y joins | módulos 4, 5, 6 |
+| Agregados registrados en la source, columnas de agregación con el nombre `<function>__<column>` | módulo 7 |
+| Índices de texto, bloom filters y proyecciones declarados en el CREATE | módulos 1, 7 |
+| Retención por particiones completas (`ttl_only_drop_parts`), muestreo que conserva las trazas adecuadas | módulo 7 |
 | Comentarios en tablas y columnas para los agentes (`agent-discovery-schema`) | módulo 8 |

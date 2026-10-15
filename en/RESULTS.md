@@ -1,103 +1,98 @@
 # Measured results · ClickHouse observability workshop
 
-Reference run of October 15, 2026, from scratch (`./run_all.sh`, 8 min in total) on the test service:
-**ClickHouse Cloud 26.6, AWS eu-central-1, 3 replicas of 64 GB (16 vCPU each)**, the configuration recommended to attendees. Durations come from `system.query_log` (server time). The data is simulated and deterministic: volumes, rows read and results are the same for every attendee; durations vary by a few tens of percent from one run to another.
+Reference run of October 15, 2026, from scratch (`./run_all.sh`, about 7 min in total) on the test service: **ClickHouse Cloud 26.6, AWS eu-central-1, 3 replicas of 64 GB (16 vCPU each)**, the configuration recommended to attendees. Durations come from `system.query_log` (server time). The data is simulated and deterministic: volumes, rows read and results are the same for every attendee; durations vary by a few tens of percent from one run to another.
 The same numbers appear as comments (`Measured`) under each statement of the SQL files.
 
 > Orders of magnitude for the slides
-> - **One day of a payment platform**: 1.38 M requests, 14.6 M spans, 8.1 M log lines, 612,000 metric points, generated in SQL
-> - **910 million log lines** written in 4 minutes (8 batches of ~30 s, 114 M lines each), **9.1 GB on disk, 11 bytes per line** after merges
-> - **Full-text search** of a rare word in 910 M lines: **0.46 s** with the text index, 3.5 s without (311,000 rows read instead of 910 M)
-> - **One trace among 910 M lines**: **18 ms** with a time range, 2.7 s with the bloom filter alone
-> - **From the page to the root cause**: 10 queries, each under half a second
-> - **Mean time to detect**: 2 minutes (deploy at 13:58, first page at 14:00)
+> - **One day of a payment platform**, generated in SQL: 1.38 M requests, 21.5 M spans, 7.8 M log lines, 612,000 metric points
+> - **The gateway in SQL**: 8.1 M agent records parsed, enriched and masked by materialized views in 6 statements of 12 to 16 s; **0 raw line stored**, 0 card number in clear, 4% of noise filtered
+> - **Detection**: first page at 14:00, **2 minutes** after the faulty deploy; resolved at 14:47
+> - **Live**: a switch replays the incident on the live stream, the burn-rate alert fires **within 1 minute**
+> - **875 million log lines** written in 8 statements of ~27 s; a rare word found in **1 s** instead of 3.8 s, a trace in **31 ms** instead of 2.4 s
+> - **Business impact**: 15,349 failed payments, **1.58 M EUR**, 7,999 merchants
 
 ---
 
-## 00 · First steps
+## 01 · Data model
 | Measure | Value |
 |---|---|
-| 1 million log lines generated, parsed with a regex and aggregated | 364 ms |
+| Service catalog | 12 nodes, 9 services, 49 pods (payment: 3 generations of 6), 11 deployment periods, 20,000 merchants, 5 dictionaries |
+| OpenTelemetry tables | the exact exporter DDL: 5 signal tables, 7 text indexes on otel_logs, plus the trace lookup table and its view |
 
-## 01 · Fundamentals and inventory
+## 02 · Collection
 | Measure | Value |
 |---|---|
-| Inventory | 12 nodes, 9 services, 49 pods (payment: 3 generations of 6), 11 deployment periods, 20,000 merchants |
-| Every table of the inventory | created and filled in under 0.1 s each |
+| Requests of the day | 1.38 M (15/s at night, 33/s during the flash sale) |
+| Gateway: 6 inserts into the Null table | 11.6 to 16.1 s each; 8.13 M records received, 319,680 health checks dropped (3.9%, 86 MB) |
+| Stored by the landing table | 0 rows |
+| Enrichment (k8sattributes from the catalog) | version, team, node and zone on every container log |
+| PCI masking | 244,982 card numbers masked, 0 in clear |
+| Spans (OTLP), 4 batches | 7.9 to 14.2 s each, 21.5 M spans (15.6 per trace, a Client and a Server span per call) |
+| Metrics | 426,240 pod points (CPU, memory), 103,680 HikariCP points, 53,280 restart counter points |
+| Live stream, quiet traffic / chaos | about 9,000 spans and 3,000 log lines per minute / 28,000 spans with 3,000 errors per minute |
+| Storage of the day | otel_traces 953 MB (x8.7), otel_logs 351 MB (x10.9), metrics under 6 MB |
 
-## 02 · Bronze
+## 03 · Search and correlation
 | Measure | Value |
 |---|---|
-| Requests generated for the day | 1.38 M (15/s at night, 33/s during the flash sale) |
-| Raw records loaded, 00:00 to 20:00 | 6 M container log lines and 354 Kubernetes events, in 4 batches of 4.7 to 8.5 s |
-| Whole day in bronze | 8.1 M records, 3.8 GB of JSON, **341 MB on disk (x11.5)** |
-| Card numbers in clear in bronze | 179,450 lines, all from one card-network-adapter pod left in DEBUG |
-| Errors in the raw text, 14:00 to 15:00 | 18,883, versus ~50 per hour the rest of the day |
+| Full-text search on 10 minutes (text index) | 24 ms, 172,032 rows read |
+| Attribute filter through the text index on `ResourceAttributeItems` | 21 ms |
+| Log → trace → pod metrics | 3 queries, under 0.6 s in total |
+| Scenario A, from a merchant ticket (log) | 4 queries, 15 to 206 ms: the merchant id leads to `maximumPoolSize=10` on a v2.4.1 pod |
+| Scenario B, from a metric alert (pool pending over 20) | fires at 14:03 on the 6 pods; 5 queries of 12 to 37 ms lead to the rollout CHG-4117 |
+| Scenario C, from a trace (new error message) | 290 "connection refused" spans from 14:21:07; 5 queries of 33 to 131 ms lead to the OOM kill, caused by the retries (fraud-scoring traffic x2.2) |
 
-## 03 · Silver
+## 04 · Dashboards (RED rollups)
 | Measure | Value |
 |---|---|
-| Log pipeline backfill (2 batches) | 2.1 M lines in 4.9 s, 3.9 M lines in 7.9 s |
-| Continuous flow, 20:00 to 24:00 through 2 materialized views | 2.1 M raw records → 2.1 M OpenTelemetry logs, 18.7 s for generation and parsing |
-| Logs with a trace id | 95.3% |
-| Card numbers masked | 244,982 lines, 0 left in clear in silver |
-| Spans written | 14.6 M in 4 batches of 5.4 to 9.3 s (10.6 spans per trace) |
-| Latency histograms from the spans (spanmetrics) | 23,350 points in 668 ms |
-| Pod gauges every 15 s / HikariCP / restarts | 426,240 / 103,680 / 53,280 points |
-| Storage | otel_traces 662 MB (x8.2), otel_logs 342 MB (x9), metrics under 6 MB |
-
-## 04 · Dictionaries
-| Measure | Value |
-|---|---|
-| Range dictionary: change live at a given time | 2 ms |
-| Payment error spans attributed to CHG-4117 | 37,084 (972 more under CHG-4118: v2.4.1 pods still running during the rollback) |
-| Revenue per merchant tier, 941,000 payments: dictGet / JOIN | 302 ms / 65 ms (the JOIN is faster here: 20,000 merchants only) |
-| Memory of the 5 dictionaries | 12 MB in total (merchants), the others under 60 KB |
-
-## 05 · Gold
-| Measure | Value |
-|---|---|
-| RED backfill | 8.3 M server spans → 20,165 rows in 1.25 s |
+| RED backfill | 8.3 M server spans → 20,160 rows in 1.27 s |
+| Same curve from the rollup / from the spans | 8,192 / 90,112 rows read |
+| spanmetrics histogram with exemplars | 23,345 points in 751 ms |
 | p99 of POST /v1/payments | 300 ms before 13:58, 3.1 s during, back at 14:44 |
-| Error rate of POST /v1/payments | 0.15% before, up to 31.8% at 14:15 |
+
+## 05 · SLOs and alerts
+| Measure | Value |
+|---|---|
 | Burn rate, 1 h window, at the peak | over 400 times the allowed rate |
-| Alerts | 11 events: first page at 14:00 (2 minutes after the deploy), node memory pressure 14:19, OOM restart 14:22, resolved 14:47 |
-| Service map | 16 edges rebuilt from the traces; payment → postgres p95 7.7 ms before, 3,033 ms during |
-| Log patterns | 8,308 patterns from 6.7 M lines; the top new pattern of the incident is the HikariPool timeout (18,011 times, 0 before) |
+| Alerts of the day | 11 events: first page at 14:00, node memory pressure 14:19, OOM restart 14:22, resolved 14:47 |
+| Chaos switch on the live stream | burn rate 450x in the first minute, fast-burn page within 1 minute, p99 alert after 3 minutes |
 
-## 06 · Performance (910 million log lines)
+## 06 · Investigation
 | Measure | Value |
 |---|---|
-| Write, 8 batches of 114 M lines | 27.9 to 31.2 s per batch, about 4 min in total, ~10 GB of memory per batch |
-| Storage after merges | 108 GB raw → **9.1 GB, x11.8, 11 bytes per line** |
+| Service map | 16 edges from the traces; payment → postgres p95 7.7 ms before, 3,033 ms during |
+| Log patterns | 31 patterns for 6.4 M lines; the top new one is the HikariPool timeout (18,011 times, 0 before) |
+| The 10 questions | 3 to 379 ms each |
+| Root cause | `INSERT payflow.payments`, HikariPool timeout, only on v2.4.1 pods (CHG-4117) |
+| Business impact, 13:58 to 14:50 | **15,349 failed payments, 1,576,893 EUR, 7,999 merchants** |
 
-| Query | Without | With | Rows read without → with |
+## 07 · Scale and cost (875 million log lines)
+| Measure | Value |
+|---|---|
+| Write, 8 batches of 109 M lines | 26.4 to 29.5 s each, about 3.5 min in total, ~10.5 GB of memory per batch |
+| Storage | 106 GB raw → 13 GB just after the inserts (x8.2, 16 bytes per line); background merges keep compressing |
+
+| Query (service at rest) | Without | With | Rows read |
 |---|---|---|---|
-| Rare word, text index | 3.45 s | **461 ms** | 910 M → 311,296 |
-| Frequent word (HikariPool), text index | 2.97 s | **333 ms** | 910 M → 9.5 M |
-| One trace id, bloom filter alone / with a time range | 2.73 s | **18 ms** | 1.8 M → 835,584 |
-| Errors per minute, projection | 890 ms | **115 ms** | 910 M → 593,063 |
-| Whole trace via the trace id lookup table | | **28 ms** | 188,416 |
-| Heavy regex aggregation, query cache | 6.89 s | **1 ms** | 910 M → 0 |
-| Same filter again, query condition cache | 1.71 s | **13 ms** | 593 M → 540,672 |
-| Full scan, 3 replicas (parallel replicas) | 6.8 s | **3.77 s** (x1.8) | 910 M (split across 3) |
+| Rare word, text index | 3.81 s | **1.05 s** | 875 M → 606,208 |
+| Frequent word (HikariPool), text index | 2.41 s | **678 ms** | 875 M → 10.3 M |
+| One trace id, bloom filter alone / with a time range | 2.38 s | **31 ms** | 1.9 M → 1 M |
+| Errors per minute, projection | 549 ms | **341 ms** | 875 M → 578,256 |
+| Whole trace via the lookup table | | **526 ms** | 245,760 |
+| Heavy regex aggregation, query cache | 5.13 s | **1 ms** | 875 M → 0 |
+| Same filter again, query condition cache | 2.37 s | **19 ms** | 875 M → 1.1 M |
+| Full scan, 3 replicas | 5.12 s | **2.11 s** (x2.4) | 875 M |
 
-Measured on a service at rest. Run right after the 8 batches, while merges are still running, the same queries are 2 to 3 times slower and parallel replicas bring little: give the service a few minutes after module 6 step 2.
+| Lever | Value |
+|---|---|
+| Rollup in ClickStack's convention | 21.5 M spans → 53,926 rows (399 spans per row), built in 2.7 s |
+| Retention sampling (errors and traces over 1 s) | 602,753 spans kept, 2.8% of the day, every trace of the incident |
+| Head sampling at 10% | the error rate is preserved, the rare traces are not |
+| Sizing rule of thumb | 12 GB of raw telemetry per day = 0.01 vCPU of ingest |
 
-## 07 · Investigation and operations
+## 08 · AI and governance
 | Measure | Value |
 |---|---|
-| The 10 questions of the investigation | 3 to 414 ms each |
-| Root cause | `INSERT payflow.payments`, HikariPool timeout, only on v2.4.1 pods (26.5% errors) versus 0 on v2.4.0 pods at the same time |
-| HikariCP during the incident | pool 10, 10 active, 45 to 49 threads waiting (v2.4.0: pool 50, ~4 active, 0 waiting) |
-| Business impact, 13:58 to 14:50 | **15,349 failed payments, 1.58 M EUR, 7,999 merchants** |
-| Timeline | deploy 13:58, first error 13:58:03, page 14:00, OOM 14:21:07, rollback 14:42, last error 14:43:39, resolved 14:47 |
-| Replay of the day from bronze, then REPLACE PARTITION | 8.1 M lines rebuilt in 15.6 s, identical counts per severity, atomic swap |
-| GDPR delete of a merchant (lightweight DELETE) | 1,017 lines, 3 to 38 s depending on the load |
-
-## 08 · ClickStack, dashboards, API, agents
-| Measure | Value |
-|---|---|
-| Dashboard tiles on gold | a few milliseconds, a few thousand rows read |
+| GDPR delete of a merchant (lightweight DELETE) | 1,017 lines, about 1 s |
+| Row policies per team | 2 policies, applied to ClickStack, the SQL console and MCP alike |
 | Status API (parameterized view on slo_burn) | 11 rows for 10 minutes, a few ms |
-| ClickStack | reads `payflow_otel` directly, sources inferred from the OpenTelemetry schema |
