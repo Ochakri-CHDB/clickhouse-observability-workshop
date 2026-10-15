@@ -66,7 +66,8 @@ SELECT count() FROM payflow_otel.logs_xl
 WHERE TraceId = (SELECT any(TraceId) FROM payflow_otel.logs_xl WHERE Cluster = 'payflow-prod-us-east' AND Timestamp BETWEEN '2026-11-21 10:00:00' AND '2026-11-21 10:00:10' AND TraceId != '')
   AND Timestamp BETWEEN '2026-11-21 09:59:00' AND '2026-11-21 10:01:00';
 -- Measured: 18 ms · 835,584 rows read (4.3 MB) · 86.5 MB memory
--- What to look for: the second query reads a few thousand rows, in a few milliseconds.
+-- What to look for: the second query answers in a few milliseconds: the time range lets
+-- the primary index skip every other day, only the granules of that window are read.
 
 
 -- STEP 4 · Errors per minute for a dashboard: the projection
@@ -187,4 +188,4 @@ GROUP BY ALL
 FORMAT Null
 SETTINGS enable_parallel_replicas = 1;
 -- Measured: 3.77 s · 910 M rows read (57 GB) · 258.2 MB memory
--- What to look for: close to 3 times faster, without changing the SQL.
+-- What to look for: about twice as fast with 3 replicas, without changing the SQL.
