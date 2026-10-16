@@ -38,10 +38,10 @@ FROM
     FROM payflow_otel.otel_traces AS c
     INNER JOIN
     (
-        SELECT TraceId, SpanId, ServiceName FROM payflow_otel.otel_traces WHERE SpanKind IN ('Client', 'Producer') AND toDate(Timestamp) = '2026-11-27'
+        SELECT TraceId, SpanId, ServiceName FROM payflow_otel.otel_traces WHERE SpanKind IN ('Client', 'Producer') AND toDate(Timestamp) = pf_black_friday()
     ) AS p ON p.TraceId = c.TraceId AND p.SpanId = c.ParentSpanId
     WHERE c.SpanKind IN ('Server', 'Consumer') AND c.ParentSpanId != '' AND p.ServiceName != c.ServiceName
-      AND toDate(c.Timestamp) = '2026-11-27'
+      AND toDate(c.Timestamp) = pf_black_friday()
 
     UNION ALL
 
@@ -49,7 +49,7 @@ FROM
            concat(SpanAttributes['db.system'] != '' ? SpanAttributes['db.system'] : 'https', ' ', SpanAttributes['server.address']),
            StatusCode = 'Error', Duration
     FROM payflow_otel.otel_traces
-    WHERE SpanKind = 'Client' AND toDate(Timestamp) = '2026-11-27'
+    WHERE SpanKind = 'Client' AND toDate(Timestamp) = pf_black_friday()
       AND SpanAttributes['rpc.system'] = ''   -- calls to another service are counted above, from their server span
 )
 GROUP BY bucket, caller, callee;
@@ -60,22 +60,22 @@ SELECT caller, callee, sum(calls) AS calls_per_day, round(100 * sum(errors) / su
 FROM payflow_sre.service_map_5m
 GROUP BY caller, callee
 ORDER BY caller, calls_per_day DESC;
--- Measured: 33 ms · 4,608 rows read (117.5 KB)
+-- Measured: 18 ms · 4,608 rows read (117.5 KB)
 -- What to look for: 16 edges. Nobody drew this map: it comes from the traces.
 -- The edge payment → postgres payments-db carries the errors.
 
 
 -- STEP 2 · The map during the incident versus one hour before
 SELECT caller, callee,
-       sumIf(calls, bucket >= '2026-11-27 12:45:00' AND bucket < '2026-11-27 13:45:00')                AS calls_before,
-       sumIf(calls, bucket >= '2026-11-27 14:00:00' AND bucket < '2026-11-27 15:00:00')                AS calls_during,
-       maxIf(p95_ms, bucket >= '2026-11-27 12:45:00' AND bucket < '2026-11-27 13:45:00')               AS p95_before_ms,
-       maxIf(p95_ms, bucket >= '2026-11-27 14:00:00' AND bucket < '2026-11-27 14:40:00')               AS p95_during_ms
+       sumIf(calls, bucket >= pf_at('12:45') AND bucket < pf_at('13:45'))                AS calls_before,
+       sumIf(calls, bucket >= pf_at('14:00') AND bucket < pf_at('15:00'))                AS calls_during,
+       maxIf(p95_ms, bucket >= pf_at('12:45') AND bucket < pf_at('13:45'))               AS p95_before_ms,
+       maxIf(p95_ms, bucket >= pf_at('14:00') AND bucket < pf_at('14:40'))               AS p95_during_ms
 FROM payflow_sre.service_map_5m
 GROUP BY caller, callee
 ORDER BY p95_during_ms / greatest(p95_before_ms, 1) DESC
 LIMIT 6;
--- Measured: 4 ms · 4,608 rows read (99.5 KB)
+-- Measured: 9 ms · 4,609 rows read (99.5 KB)
 -- What to look for: the edges whose latency exploded. The database edge is at the top,
 -- fraud-scoring follows: the retries make it slower too (a second, smaller fire).
 
@@ -109,27 +109,27 @@ SELECT
     any(Body)                                  AS example
 FROM payflow_otel.otel_logs
 WHERE ServiceName NOT IN ('api-gateway', 'k8s-events')   -- access logs are better read as metrics (status, duration)
-  AND toDate(Timestamp) = '2026-11-27'
+  AND toDate(Timestamp) = pf_black_friday()
 GROUP BY bucket, service, severity, pattern;
 
 SYSTEM WAIT VIEW payflow_sre.rmv_log_patterns;
 
 SELECT uniqExact(pattern) AS patterns, sum(n) AS log_lines
 FROM payflow_sre.log_patterns_10m;
--- Measured: 33 ms · 2,760 rows read (133.2 KB)
+-- Measured: 17 ms · 2,760 rows read (133.1 KB)
 
 
 -- STEP 4 · The patterns that only appear during the incident
 --  Compare 14:00-14:40 with the same 40 minutes one hour earlier.
 SELECT service, severity, pattern,
-       sumIf(n, bucket >= '2026-11-27 14:00:00' AND bucket < '2026-11-27 14:40:00') AS during,
-       sumIf(n, bucket >= '2026-11-27 12:50:00' AND bucket < '2026-11-27 13:30:00') AS before
+       sumIf(n, bucket >= pf_at('14:00') AND bucket < pf_at('14:40')) AS during,
+       sumIf(n, bucket >= pf_at('12:50') AND bucket < pf_at('13:30')) AS before
 FROM payflow_sre.log_patterns_10m
 GROUP BY service, severity, pattern
 HAVING during > 10 * greatest(before, 1)
 ORDER BY during DESC
 LIMIT 10;
--- Measured: 4 ms · 2,760 rows read (149.5 KB)
+-- Measured: 8 ms · 2,761 rows read (149.5 KB)
 -- What to look for: the HikariPool timeout comes first, by far. Then the checkout
 -- errors that only relay it, the fraud-scoring warnings and its OOM. The root cause
 -- is the most frequent NEW pattern of the most upstream failing service.
@@ -141,4 +141,4 @@ SELECT
     if((SELECT argMax(pattern, n) FROM (SELECT pattern, sum(n) AS n FROM payflow_sre.log_patterns_10m
         WHERE severity = 'ERROR' GROUP BY pattern)) LIKE 'HikariPool%', 'OK', 'KO')                                    AS top_error_pattern
 SETTINGS select_sequential_consistency = 1;
--- Measured: 23 ms · 7,369 rows read (145.4 KB)
+-- Measured: 40 ms · 7,369 rows read (145.4 KB)

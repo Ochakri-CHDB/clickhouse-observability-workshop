@@ -23,15 +23,15 @@ SET use_query_condition_cache = 0;
 --  hasToken(lower(Body), 'oomkilled') uses idx_lower_body, built with the same
 --  expression lower(Body) and the same tokenizer (splitByNonAlpha).
 SELECT count() FROM payflow_otel.logs_xl WHERE hasToken(lower(Body), 'oomkilled');
--- Measured: 1.05 s · 606,208 rows read (592 KB)
+-- Measured: 774 ms · 286,720 rows read (280 KB)
 
 SELECT count() FROM payflow_otel.logs_xl WHERE hasToken(lower(Body), 'oomkilled')
 SETTINGS use_skip_indexes = 0;   -- the same query, index disabled: every Body is read
--- Measured: 3.81 s · 875 M rows read (52.5 GB) · 479.2 MB memory
+-- Measured: 4.27 s · 875 M rows read (52.5 GB) · 448 MB memory
 
 SELECT count() FROM payflow_otel.logs_xl WHERE lower(Body) LIKE '%oomkilled%'
 SETTINGS use_skip_indexes = 0;   -- what a grep would do
--- Measured: 2.43 s · 875 M rows read (52.5 GB) · 505.6 MB memory
+-- Measured: 2.98 s · 875 M rows read (52.5 GB) · 462 MB memory
 -- What to look for: with the index, a few hundred thousand rows read instead of 875 million.
 
 
@@ -41,7 +41,7 @@ FROM payflow_otel.logs_xl
 WHERE hasToken(lower(Body), 'hikaripool')
 GROUP BY Cluster
 ORDER BY Cluster;
--- Measured: 678 ms · 10.3 M rows read (19.7 MB) · 92.7 MB memory
+-- Measured: 367 ms · 9.7 M rows read (18.4 MB) · 110.2 MB memory
 
 SELECT Cluster, count() AS errors
 FROM payflow_otel.logs_xl
@@ -49,7 +49,7 @@ WHERE hasToken(lower(Body), 'hikaripool')
 GROUP BY Cluster
 ORDER BY Cluster
 SETTINGS use_skip_indexes = 0;
--- Measured: 2.41 s · 875 M rows read (52.6 GB) · 405.9 MB memory
+-- Measured: 3.09 s · 875 M rows read (52.6 GB) · 365.1 MB memory
 -- What to look for: the gain shrinks when the word is everywhere, but stays large:
 -- the index still skips every granule without the word.
 
@@ -59,13 +59,13 @@ SETTINGS use_skip_indexes = 0;
 --  lets the primary index and the partitions do the rest: this is why tracing
 --  tools first look up the time range of a trace (step 5).
 SELECT count() FROM payflow_otel.logs_xl
-WHERE TraceId = (SELECT any(TraceId) FROM payflow_otel.logs_xl WHERE Cluster = 'payflow-prod-us-east' AND Timestamp BETWEEN '2026-11-21 10:00:00' AND '2026-11-21 10:00:10' AND TraceId != '');
--- Measured: 2.38 s · 1.9 M rows read (34.7 MB) · 149 MB memory
+WHERE TraceId = (SELECT any(TraceId) FROM payflow_otel.logs_xl WHERE Cluster = 'payflow-prod-us-east' AND Timestamp BETWEEN pf_at('10:00:00') - INTERVAL 6 DAY AND pf_at('10:00:10') - INTERVAL 6 DAY AND TraceId != '');
+-- Measured: 2.96 s · 1.2 M rows read (31.5 MB) · 91.4 MB memory
 
 SELECT count() FROM payflow_otel.logs_xl
-WHERE TraceId = (SELECT any(TraceId) FROM payflow_otel.logs_xl WHERE Cluster = 'payflow-prod-us-east' AND Timestamp BETWEEN '2026-11-21 10:00:00' AND '2026-11-21 10:00:10' AND TraceId != '')
-  AND Timestamp BETWEEN '2026-11-21 09:59:00' AND '2026-11-21 10:01:00';
--- Measured: 31 ms · 1 M rows read (5.4 MB) · 69.1 MB memory
+WHERE TraceId = (SELECT any(TraceId) FROM payflow_otel.logs_xl WHERE Cluster = 'payflow-prod-us-east' AND Timestamp BETWEEN pf_at('10:00:00') - INTERVAL 6 DAY AND pf_at('10:00:10') - INTERVAL 6 DAY AND TraceId != '')
+  AND Timestamp BETWEEN pf_at('09:59:00') - INTERVAL 6 DAY AND pf_at('10:01:00') - INTERVAL 6 DAY;
+-- Measured: 22 ms · 368,641 rows read (3.7 MB)
 -- What to look for: the second query answers in a few milliseconds: the time range lets
 -- the primary index skip every other day, only the granules of that window are read.
 
@@ -79,7 +79,7 @@ WHERE SeverityText = 'ERROR' AND Cluster = 'payflow-prod-eu-west'
 GROUP BY minute
 ORDER BY errors DESC
 LIMIT 5;
--- Measured: 341 ms · 578,256 rows read (12.1 MB)
+-- Measured: 712 ms · 465,928 rows read (9.8 MB)
 
 SELECT toStartOfMinute(Timestamp) AS minute, count() AS errors
 FROM payflow_otel.logs_xl
@@ -88,7 +88,7 @@ GROUP BY minute
 ORDER BY errors DESC
 LIMIT 5
 SETTINGS optimize_use_projections = 0;
--- Measured: 549 ms · 875 M rows read (2.1 GB) · 205.9 MB memory
+-- Measured: 1.08 s · 875 M rows read (2.9 GB) · 241.9 MB memory
 -- What to look for: the same 5 minutes (14:21 every day: the copies of Black Friday),
 -- from about 600,000 rows instead of 875 million.
 
@@ -97,7 +97,7 @@ SELECT toStartOfMinute(Timestamp) AS minute, count()
 FROM payflow_otel.logs_xl
 WHERE SeverityText = 'ERROR' AND Cluster = 'payflow-prod-eu-west'
 GROUP BY minute;
--- Measured: 6 ms · 14 rows read
+-- Measured: 5 ms · 14 rows read
 
 
 -- STEP 5 · The trace lookup table at work
@@ -105,13 +105,13 @@ GROUP BY minute;
 --  gives the time range, the real query then reads one narrow window of otel_traces.
 --  This is what ClickStack does when you open a trace.
 WITH (SELECT any(TraceId) FROM payflow_otel.otel_traces WHERE ServiceName = 'payment' AND StatusCode = 'Error'
-      AND Timestamp BETWEEN '2026-11-27 14:10:00' AND '2026-11-27 14:10:01') AS tid,
+      AND Timestamp BETWEEN pf_at('14:10') AND pf_at('14:10:01')) AS tid,
      (SELECT (min(Start), max(End)) FROM payflow_otel.otel_traces_trace_id_ts WHERE TraceId = tid) AS range
 SELECT ServiceName, SpanName, round(Duration / 1e6, 1) AS ms, StatusCode
 FROM payflow_otel.otel_traces
 WHERE TraceId = tid AND Timestamp BETWEEN range.1 - INTERVAL 1 SECOND AND range.2 + INTERVAL 1 SECOND
 ORDER BY Timestamp;
--- Measured: 526 ms · 245,760 rows read (5.1 MB)
+-- Measured: 454 ms · 245,761 rows read (5.5 MB)
 -- What to look for: a whole trace, read from a window of a few seconds.
 
 
@@ -126,7 +126,7 @@ FROM payflow_otel.logs_xl
 WHERE match(Body, 'took=[0-9]+ms')
 GROUP BY ServiceName
 SETTINGS use_query_cache = 1;
--- Measured: 5.13 s · 875 M rows read (52.7 GB) · 356 MB memory
+-- Measured: 6.99 s · 875 M rows read (52.7 GB) · 302.6 MB memory
 
 SELECT ServiceName, count() AS lines, round(avg(toUInt32OrZero(extract(Body, 'took=([0-9]+)ms')))) AS avg_ms
 FROM payflow_otel.logs_xl
@@ -144,12 +144,12 @@ SET use_query_condition_cache = 1;
 
 SELECT count() FROM payflow_otel.logs_xl WHERE lower(Body) LIKE '%connection refused%'
 SETTINGS use_skip_indexes = 0;
--- Measured: 2.37 s · 875 M rows read (52.5 GB) · 506 MB memory
+-- Measured: 2.94 s · 875 M rows read (52.5 GB) · 462 MB memory
 
 SELECT Cluster, count() FROM payflow_otel.logs_xl WHERE lower(Body) LIKE '%connection refused%'
 GROUP BY Cluster
 SETTINGS use_skip_indexes = 0;
--- Measured: 19 ms · 1.1 M rows read (46.3 MB) · 158.3 MB memory
+-- Measured: 14 ms · 745,472 rows read (32.5 MB) · 99.9 MB memory
 -- What to look for: the first run reads everything, the second almost nothing.
 
 SET use_query_condition_cache = 0;
@@ -162,12 +162,12 @@ SELECT Cluster, ServiceName, SeverityText, count() AS lines, uniq(PodName) AS po
 FROM payflow_otel.logs_xl
 GROUP BY ALL
 FORMAT Null;
--- Measured: 5.12 s · 875 M rows read (55.8 GB) · 504.3 MB memory
+-- Measured: 7.03 s · 875 M rows read (55.8 GB) · 398.4 MB memory
 
 SELECT Cluster, ServiceName, SeverityText, count() AS lines, uniq(PodName) AS pods, sum(length(Body)) AS body_bytes
 FROM payflow_otel.logs_xl
 GROUP BY ALL
 FORMAT Null
 SETTINGS enable_parallel_replicas = 1;
--- Measured: 2.11 s · 875 M rows read (55.8 GB) · 335.8 MB memory
+-- Measured: 3.56 s · 875 M rows read (55.8 GB) · 261 MB memory
 -- What to look for: about twice as fast with 3 replicas, without changing the SQL.

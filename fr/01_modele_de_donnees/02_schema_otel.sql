@@ -27,9 +27,9 @@
 --    · bloom filters sur TraceId, minmax sur Duration.
 --    · DateTime64(9) avec Delta + ZSTD : des horodatages à la nanoseconde presque gratuits.
 --    · PARTITION BY jour et TTL avec ttl_only_drop_parts : les jours expirés sont supprimés
---      par parts entières. La rétention est ici de 3 ans pour que les données du workshop
---      (novembre 2026) n'expirent jamais pendant la formation ; ClickStack met 3 jours par
---      défaut (module 7).
+--      par parts entières. La rétention est ici de 3 ans, pour que le mois de données du
+--      workshop n'expire jamais pendant la formation ; ClickStack met 3 jours par défaut
+--      (module 7).
 -- =====================================================================
 
 

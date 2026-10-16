@@ -16,8 +16,8 @@
 # =====================================================================
 set -euo pipefail
 
-: "${CH_HOST:?Define CH_HOST}"
-: "${CH_PASSWORD:?Define CH_PASSWORD}"
+: "${CH_HOST:?Set CH_HOST}"
+: "${CH_PASSWORD:?Set CH_PASSWORD}"
 CH_USER="${CH_USER:-default}"
 if [ -z "${CLICKHOUSE_BIN:-}" ]; then [ -x ./clickhouse ] && CLICKHOUSE_BIN=./clickhouse || CLICKHOUSE_BIN=clickhouse; fi
 CLIENT="$CLICKHOUSE_BIN client --host $CH_HOST --secure --user $CH_USER --password $CH_PASSWORD"
@@ -58,11 +58,11 @@ for f in "${FILES[@]}"; do
   echo "-> $f"
   t0=$(date +%s)
   if $CLIENT --multiquery --time --format PrettyCompactMonoBlock < "$f" > "logs/$(basename "$f" .sql).log" 2>&1; then
-    echo "   OK en $(( $(date +%s) - t0 )) s"
+    echo "   OK in $(( $(date +%s) - t0 )) s"
   else
-    echo "   FALLO, ver logs/$(basename "$f" .sql).log"
+    echo "   FAILED, see logs/$(basename "$f" .sql).log"
     tail -20 "logs/$(basename "$f" .sql).log"
     exit 1
   fi
 done
-echo "Terminado. Resultados detallados en ./logs/"
+echo "Done. Detailed results in ./logs/"

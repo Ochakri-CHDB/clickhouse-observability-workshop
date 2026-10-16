@@ -14,13 +14,16 @@
 --  Lightweight DELETE marks the rows as deleted at once (they disappear from every
 --  query), the space is reclaimed by the next merges. No full rewrite of the table.
 SELECT count() AS lines_before FROM payflow_otel.otel_logs WHERE LogAttributes['merchant_id'] = 'm_00042';
--- Measured: 540 ms · 3.4 M rows read (19.1 MB) · 206.7 MB memory
+-- Measured: 1.35 s · 23.3 M rows read (111.9 MB) · 145.8 MB memory
 
 DELETE FROM payflow_otel.otel_logs WHERE LogAttributes['merchant_id'] = 'm_00042';
--- Measured: 1.03 s
+-- Measured: 23.2 s
 
-SELECT count() AS lines_after FROM payflow_otel.otel_logs WHERE LogAttributes['merchant_id'] = 'm_00042';
--- Measured: 69 ms · 3.4 M rows read (20.6 MB) · 265 MB memory
+--  The live stream keeps generating payments of this merchant (it is still a customer):
+--  what counts is that nothing written before the request remains.
+SELECT count() AS lines_after FROM payflow_otel.otel_logs
+WHERE LogAttributes['merchant_id'] = 'm_00042' AND Timestamp < now() - INTERVAL 5 MINUTE;
+-- Measured: 418 ms · 23.3 M rows read (309.3 MB) · 268.5 MB memory
 
 
 -- STEP 2 · Each team sees its own namespace
@@ -33,7 +36,7 @@ CREATE ROW POLICY OR REPLACE pf_payments_logs   ON payflow_otel.otel_logs   USIN
 CREATE ROW POLICY OR REPLACE pf_payments_traces ON payflow_otel.otel_traces USING ResourceAttributes['k8s.namespace.name'] = 'payments' TO payflow_team_payments;
 --  The gateway landing table is the pipeline's, nobody else writes to it.
 REVOKE ALL ON payflow_ingest.* FROM payflow_team_payments;
--- Measured: 5 ms
+-- Measured: 7 ms
 
 SELECT short_name, database, table, select_filter, apply_to_list
 FROM system.row_policies
@@ -57,21 +60,21 @@ FROM clusterAllReplicas('default', system.query_log)
 WHERE type = 'QueryFinish' AND event_date >= today() - 1 AND has(databases, 'payflow_otel')
 GROUP BY query_kind
 ORDER BY queries DESC;
--- Measured: 23 ms · 17,263 rows read (605.3 KB)
+-- Measured: 29 ms · 106,751 rows read (3.8 MB)
 
 SELECT view_name, count() AS runs, round(avg(view_duration_ms), 1) AS avg_ms, sum(written_rows) AS rows_written
 FROM clusterAllReplicas('default', system.query_views_log)
 WHERE event_date >= today() - 1 AND view_name LIKE 'payflow\\_%'
 GROUP BY view_name
 ORDER BY rows_written DESC;
--- Measured: 17 ms · 2,927 rows read (55.4 KB)
+-- Measured: 17 ms · 9,073 rows read (245.1 KB)
 -- What to look for: the materialized views of modules 3 and 5, how often they ran
 -- and how many rows they wrote. This is the health of the pipeline.
 
 
 -- STEP 4 · Checkpoint
 SELECT
-    if((SELECT count() FROM payflow_otel.otel_logs WHERE LogAttributes['merchant_id'] = 'm_00042') = 0, 'OK', 'KO') AS gdpr_delete,
+    if((SELECT count() FROM payflow_otel.otel_logs WHERE LogAttributes['merchant_id'] = 'm_00042' AND Timestamp < now() - INTERVAL 5 MINUTE) = 0, 'OK', 'KO') AS gdpr_delete,
     if((SELECT count() FROM system.row_policies WHERE short_name LIKE 'pf\\_payments%') = 2, 'OK', 'KO')            AS row_policies
 SETTINGS select_sequential_consistency = 1;
--- Measured: 17 ms · 14 rows read (3.1 KB)
+-- Measured: 508 ms · 23.3 M rows read (309.3 MB) · 264.7 MB memory

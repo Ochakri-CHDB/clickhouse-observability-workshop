@@ -14,28 +14,34 @@ Duración: 40 min.
 
 ---
 
-## 1. AI Notebooks (beta, solo Managed ClickStack)
+## 1. AI Notebooks (beta)
 
-Un notebook es una investigación escrita por un agente de IA, tile a tile: su razonamiento, cada consulta que ejecutó, los gráficos y su conclusión. Puedes bifurcar desde cualquier paso, añadir tus propios tiles y compartirlo con el equipo.
+Un notebook es una investigación escrita como una lista de bloques: búsquedas, gráficos, tablas, notas. Un agente de IA puede escribir los bloques por ti a partir de una pregunta; tú conservas, editas o añades bloques, y compartes el notebook con el equipo.
 
-1. Un administrador del equipo activa la IA: **Team Settings**, **Security Policies**, activa **Generative AI** y acepta.
-2. **Notebooks** (menú de la izquierda), **New Shared Notebook**.
-3. Pregunta: *"¿Por qué falló POST /v1/payments entre las 13:58 y las 14:45 del 27 de noviembre de 2026 (UTC)? ¿Qué versión, qué pods y cuál fue la causa raíz?"*
-4. Lee los tiles: el agente busca en los logs, abre trazas, compara versiones. Si sigue una pista que no te convence, usa **Restart from Here** con un nuevo prompt para bifurcar la investigación.
-5. Compara su conclusión con la tuya (módulo 6). Después prueba sobre el flujo en directo, tras volver a romper producción (módulo 5): *"¿Qué les pasa a los pagos en los últimos 10 minutos?"*
+1. Comprueba que la IA está activada: **Team Settings**, pestaña **API & Agents**, sección **Configure Generative AI**. Dice *Generative AI features are enabled for this service* y enumera **Chart AI Assistant** (el AI Assistant de Chart Explorer, módulo 4) y **AI Notebooks**. Si no, un administrador del equipo las activa ahí.
+2. Tu fecha de Black Friday: `SELECT pf_black_friday()` en la consola SQL.
+3. Menú de la izquierda, **AI notebooks**, **New Shared Notebook** (el equipo lo ve) o **New Private Notebook** (solo tú).
+4. En el campo **Ask AI to explore your data**, escribe, con tu fecha: *¿Por qué falló POST /v1/payments entre las 13:58 y las 14:45 UTC del YYYY-MM-DD? ¿Qué versión, qué pods y cuál fue la causa raíz? Usa las fuentes PayFlow.*
+5. Lee los bloques a medida que llegan: el agente busca en los logs, abre trazas, compara versiones. Cada bloque se puede abrir y editar como una búsqueda o un gráfico normal.
+6. Compara su conclusión con la tuya (módulo 6). Después prueba sobre el flujo en directo, tras volver a romper producción (módulo 5): *¿Qué les pasa a los pagos en los últimos 10 minutos?*
+
+La función está en beta: puede que la IA solo ponga título al notebook y no añada ningún bloque. En ese caso, construye tú la investigación con **Manual Block**: **Search**, **Chart**, **Table**, **Markdown**. Un notebook escrito a mano sigue siendo el mejor borrador de postmortem: cada bloque es una consulta viva, no una captura de pantalla.
 
 ---
 
 ## 2. El servidor MCP de ClickStack
 
-ClickStack expone un servidor MCP: cualquier cliente MCP (Claude Code, Cursor, VS Code...) puede buscar en logs y trazas, y leer dashboards y alertas, con tus permisos.
+ClickStack expone un servidor MCP: cualquier cliente MCP (Claude Code, Cursor, VS Code, Codex CLI...) puede buscar en logs y trazas, y leer dashboards y alertas, con tus permisos.
 
-1. En la consola Cloud: **Connect**, **Connect with MCP**, actívalo en el servicio.
-2. Endpoint `https://mcp.clickhouse.cloud/clickstack`, inicio de sesión OAuth en el primer uso (sin API key). Por ejemplo con Claude Code:
+1. **Team Settings**, pestaña **API & Agents**, sección **Connect your AI agents**. **Remote MCP server** debe decir **ENABLED**.
+2. Elige tu herramienta en las pestañas (**Claude Code**, **Cursor**, **VS Code**, **Codex CLI**, **OpenCode**, **Other**) y copia el comando que aparece. Para Claude Code lleva el id de tu servicio en una cabecera:
    ```bash
-   claude mcp add --transport http clickstack https://mcp.clickhouse.cloud/clickstack
+   claude mcp add clickstack --transport http https://mcp.clickhouse.cloud/clickstack --header "x-service-id: <your service id>"
    ```
-3. Pregunta a tu asistente: *"Con ClickStack, encuentra los event patterns de los errores de pago del 27 de noviembre de 2026 entre las 14:00 y las 14:45 y abre la traza más lenta."*
+   El **Service ID** está arriba en la misma pestaña, con un botón **Copy**. La primera llamada abre un inicio de sesión en el navegador (OAuth, sin API key). **Manage sessions** enumera y revoca las herramientas conectadas.
+3. Pregunta a tu asistente, con tu fecha: *Con ClickStack, encuentra los event patterns de los errores de pago del YYYY-MM-DD entre las 14:00 y las 14:45 UTC y abre la traza más lenta.*
+
+En la misma pestaña, **Export to Terraform** (experimental) descarga los dashboards, alertas, búsquedas guardadas y fuentes del equipo como un fichero de importación de Terraform: la configuración de este taller, versionada como código.
 
 ---
 
@@ -47,20 +53,20 @@ ClickHouse Agents trabajan en el lado SQL del servicio, con tres herramientas: C
 Un agente lee primero los comentarios de tablas y columnas (regla `agent-discovery-schema`). Sin ellos, adivina qué significa `burn_1h`.
 ```sql
 ALTER TABLE payflow_sre.red_1m
-    MODIFY COMMENT 'Métricas RED por minuto: una fila por servicio, operación (span name) y minuto. Termina la agregación con sum(requests), sum(errors), quantilesTDigestMerge(0.5, 0.95, 0.99)(latency) (nanosegundos). Filtra primero por service.',
-    COMMENT COLUMN latency 'Estado quantilesTDigest de las duraciones de los spans en nanosegundos: usa quantilesTDigestMerge(0.5, 0.95, 0.99)(latency)[3] / 1e6 para el p99 en ms';
+    MODIFY COMMENT 'RED metrics per minute: one row per service, operation (span name) and minute. Finish the aggregation with sum(requests), sum(errors), quantilesTDigestMerge(0.5, 0.95, 0.99)(latency) (nanoseconds). Filter on service first.',
+    COMMENT COLUMN latency 'quantilesTDigest state of span durations in nanoseconds: use quantilesTDigestMerge(0.5, 0.95, 0.99)(latency)[3] / 1e6 for p99 in ms';
 
 ALTER TABLE payflow_sre.slo_burn
-    MODIFY COMMENT 'Tasa de consumo (burn rate) del presupuesto de errores de cada ruta de api-gateway, por minuto. burn_5m y burn_1h: cuántas veces más rápido de lo permitido se gasta el presupuesto (1 = dentro del presupuesto). fast_burn = ambos por encima de 14,4.';
+    MODIFY COMMENT 'Error budget burn rate of each api-gateway route, per minute. burn_5m and burn_1h: how many times faster than allowed the budget is spent (1 = on budget). fast_burn = both above 14.4.';
 
 ALTER TABLE payflow_sre.alerts
-    MODIFY COMMENT 'Eventos de alerta (FIRING / RESOLVED) de las cuatro reglas: slo_fast_burn, p99_latency, container_restart, node_memory_pressure.';
+    MODIFY COMMENT 'Alert events (FIRING / RESOLVED) of the four rules: slo_fast_burn, p99_latency, container_restart, node_memory_pressure.';
 
 ALTER TABLE payflow_otel.otel_traces
-    MODIFY COMMENT 'Spans OpenTelemetry de PayFlow. Timestamp en UTC (nanosegundos), Duration en nanosegundos, StatusCode Error o Unset. Filtra siempre por Timestamp y ServiceName. Versión del pod en ResourceAttributes[''service.version''], campos de negocio en SpanAttributes (payment.amount, payment.status, merchant.id).';
+    MODIFY COMMENT 'OpenTelemetry spans of PayFlow. Timestamp in UTC (nanoseconds), Duration in nanoseconds, StatusCode Error or Unset. Always filter on Timestamp and ServiceName. Pod version in ResourceAttributes[''service.version''], business fields in SpanAttributes (payment.amount, payment.status, merchant.id).';
 
 ALTER TABLE payflow_otel.otel_logs
-    MODIFY COMMENT 'Logs OpenTelemetry de PayFlow, números de tarjeta enmascarados. Filtra siempre por Timestamp. Búsqueda de texto completo: hasToken(lower(Body), ''palabra''). Los eventos de Kubernetes tienen ServiceName = ''k8s-events'' y el motivo en EventName.';
+    MODIFY COMMENT 'OpenTelemetry logs of PayFlow, card numbers masked. Always filter on Timestamp. Full-text search: hasToken(lower(Body), ''word''). Kubernetes events have ServiceName = ''k8s-events'' and the reason in EventName.';
 
 SELECT name, comment FROM system.tables WHERE database IN ('payflow_sre', 'payflow_otel') AND comment != '' ORDER BY name
 ```
@@ -71,7 +77,8 @@ SELECT name, comment FROM system.tables WHERE database IN ('payflow_sre', 'payfl
 3. **Instructions** (pégalas tal cual):
    ```
    Eres el asistente SRE de PayFlow, una plataforma de pagos sobre Kubernetes. Responde en español, de forma breve.
-   - Los datos están en UTC, del viernes 27 de noviembre de 2026. Usa rangos de tiempo absolutos de ese día.
+   - Los datos están en UTC. El incidente es en Black Friday: su fecha es SELECT pf_black_friday(), y
+     pf_at('14:00:00') son las 14:00 de ese día. Usa rangos de tiempo absolutos construidos con estas funciones.
    - Usa preferentemente los agregados: payflow_sre.red_1m (RED por minuto), payflow_sre.slo_burn,
      payflow_sre.alerts, payflow_sre.service_map_5m, payflow_sre.log_patterns_10m.
      Ve a payflow_otel.otel_traces y otel_logs solo para los detalles, siempre con un filtro sobre Timestamp
@@ -84,12 +91,12 @@ SELECT name, comment FROM system.tables WHERE database IN ('payflow_sre', 'payfl
      ClickHouse, mantén el resultado compacto (unos pocos miles de filas como máximo), pega los datos en el
      código y ejecútalo tú mismo con Run Code. Run Code no tiene acceso a ClickHouse. Muestra el resultado en un artifact.
    ```
-4. Guarda (**Save**), abre una conversación y elige el agente.
+4. Guarda, abre una conversación y elige el agente.
 
 ### 3.3 · Dos preguntas
 | Pregunta | Respuesta esperada |
 |---|---|
-| "¿Qué les pasó a los pagos entre las 13:55 y las 14:50 del 27 de noviembre?" | tasa de errores de `POST /v1/payments` de hasta ~30 %, p99 de 3 s, de 13:58 a 14:44; causa raíz: timeouts de HikariPool en `payment` v2.4.1 (CHG-4117, pool de 10); primer aviso a las 14:00 |
+| "¿Qué les pasó a los pagos entre las 13:55 y las 14:50 de Black Friday?" | tasa de errores de `POST /v1/payments` de hasta ~30 %, p99 de 3 s, de 13:58 a 14:44; causa raíz: timeouts de HikariPool en `payment` v2.4.1 (CHG-4117, pool de 10); primer aviso a las 14:00 |
 | "¿Cuánto dinero costó el incidente y qué comercios fueron los más afectados?" | ~15 300 pagos fallidos, ~1,58 M EUR, ~8000 comercios; los comercios principales por importe |
 
 ### 3.4 · Dashboards a demanda
@@ -119,8 +126,14 @@ GRANT SELECT, dictGet ON payflow_inventory.* TO payflow_agent_role;
 
 ## 4. Roles y accesos
 
-- **En ClickStack (RBAC, Managed)**: **Team Settings**, roles Admin, Member, ReadOnly, o roles personalizados con No Access / Read / Manage por recurso (dashboards, saved searches, alerts, notebooks). Da al equipo de pagos Manage sobre sus propios dashboards y alertas, y Read en el resto.
-- **En ClickHouse**: `01_seguridad_y_operacion.sql` crea un rol por equipo y una row policy por tabla. ClickStack consulta el servicio con los permisos del usuario: el equipo de pagos solo ve el namespace `payments`, en la consola SQL, en ClickStack y a través del servidor MCP.
+### En ClickStack
+1. **Team Settings**, pestaña **Members & Roles**. Arriba, los miembros del equipo (**Manage in Console** para invitar a gente, desde la organización Cloud). Debajo, los roles: **Admin**, **Member**, **ReadOnly**, y **Default New User Role** al final (el rol de quien se une).
+2. **Add Role**: **Role Name** `Payments SRE`, una **Description**, y luego una línea por recurso con **No Access**, **Read** o **Manage**: Dashboards, Saved Searches, Sources, Webhooks, Alerts, Notebooks; **Users** (No Access, Read) y **Team** (Read, Manage).
+3. La flecha al final de Dashboards, Saved Searches, Sources y Notebooks abre **Fine-Grained Controls**: **Add Access Rule**, una **Condition** sobre el **Name**, el **ID** o un **Tag** (`is` o `contains`), y el nivel de acceso de los objetos que coinciden. Por ejemplo, Dashboards, Tag is `payments`, **Manage**: el equipo edita sus propios dashboards y solo lee los demás.
+4. Cierra con la **x** si solo estabas mirando; **Create Role** lo guarda.
+
+### En ClickHouse
+`01_seguridad_y_operacion.sql` crea un rol por equipo y una row policy por tabla. ClickStack consulta el servicio con los permisos del usuario: el equipo de pagos solo ve el namespace `payments`, en la consola SQL, en ClickStack y a través del servidor MCP. Los roles de ClickStack deciden lo que puedes hacer en la interfaz; los roles de ClickHouse deciden qué filas puedes leer.
 
 ---
 
@@ -139,7 +152,7 @@ ORDER BY minute
 
 ### 5.2 · Probarla
 ```sql
-SELECT * FROM payflow_sre.api_route_status(route = 'POST /v1/payments', start = '2026-11-27 14:00:00', finish = '2026-11-27 14:10:00')
+SELECT * FROM payflow_sre.api_route_status(route = 'POST /v1/payments', start = pf_at('14:00:00'), finish = pf_at('14:10:00'))
 ```
 
 ### 5.3 · Publicarla como endpoint
@@ -148,16 +161,16 @@ SELECT * FROM payflow_sre.api_route_status(route = 'POST /v1/payments', start = 
    SELECT * FROM payflow_sre.api_route_status(route = {route:String}, start = {start:DateTime}, finish = {finish:DateTime})
    ```
 2. **Save** como `api_route_status`, luego **Share**, **API Endpoint**: elige una API key con el acceso **Query Endpoints** y el rol de base de datos **Read only**.
-3. Llámalo (sustituye los dos valores):
+3. Llámalo (sustituye los dos valores, y `YYYY-MM-DD` por tu fecha de Black Friday):
    ```bash
    curl --user '<Key ID>:<Key secret>' \
-     'https://queries.clickhouse.cloud/run/<endpoint id>?format=JSONEachRow&param_route=POST%20%2Fv1%2Fpayments&param_start=2026-11-27%2014%3A00%3A00&param_finish=2026-11-27%2014%3A10%3A00'
+     'https://queries.clickhouse.cloud/run/<endpoint id>?format=JSONEachRow&param_route=POST%20%2Fv1%2Fpayments&param_start=YYYY-MM-DD%2014%3A00%3A00&param_finish=YYYY-MM-DD%2014%3A10%3A00'
    ```
 
 Mientras no tengas una key, la interfaz HTTPS del servicio acepta los mismos parámetros (solo para probar: nunca pongas la contraseña de `default` en un front end):
 ```bash
 curl --user "default:$CH_PASSWORD" \
-  "https://$CH_HOST:8443/?param_route=POST%20%2Fv1%2Fpayments&param_start=2026-11-27%2014%3A00%3A00&param_finish=2026-11-27%2014%3A10%3A00&default_format=JSONEachRow" \
+  "https://$CH_HOST:8443/?param_route=POST%20%2Fv1%2Fpayments&param_start=YYYY-MM-DD%2014%3A00%3A00&param_finish=YYYY-MM-DD%2014%3A10%3A00&default_format=JSONEachRow" \
   --data-binary "SELECT * FROM payflow_sre.api_route_status(route = {route:String}, start = {start:DateTime}, finish = {finish:DateTime})"
 ```
 Respuesta esperada: 11 filas, `fast_burn` a true desde las 14:00.
@@ -166,12 +179,16 @@ Respuesta esperada: 11 filas, `fast_burn` a true desde las 14:00.
 
 ## Fin de la jornada
 
-Detén el flujo en directo del módulo 2; si no, el servicio nunca entra en reposo:
+Detén el flujo en directo del módulo 2 (siete vistas refrescables); si no, el servicio nunca entra en reposo: ejecuta `detener_flujo_en_directo.sql`, o:
 
 ```sql
-SYSTEM STOP VIEW payflow_sim.rmv_live_traces;
 SYSTEM STOP VIEW payflow_sim.rmv_live_logs;
+SYSTEM STOP VIEW payflow_sim.rmv_live_traces;
 SYSTEM STOP VIEW payflow_sim.rmv_live_metrics;
+SYSTEM STOP VIEW payflow_sim.rmv_live_sums;
+SYSTEM STOP VIEW payflow_sim.rmv_chaos_traces;
+SYSTEM STOP VIEW payflow_sim.rmv_chaos_logs;
+SYSTEM STOP VIEW payflow_sim.rmv_chaos_metrics;
 ```
 
-(o ejecuta `detener_flujo_en_directo.sql`). `reset.sql` borra todo lo que ha creado el taller.
+`reset.sql` borra todo lo que ha creado el taller en el servicio. Los objetos de ClickStack (fuentes, dashboard, búsqueda guardada, alertas, notebooks) se quedan: bórralos desde la interfaz si quieres un equipo limpio.

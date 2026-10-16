@@ -11,24 +11,24 @@
 -- P1 · ¿Qué ha saltado, y cuándo?
 SELECT ts, rule, service, state, summary
 FROM payflow_sre.alerts
-WHERE ts BETWEEN '2026-11-27 13:50:00' AND '2026-11-27 15:00:00'
+WHERE ts BETWEEN pf_at('13:50') AND pf_at('15:00')
 ORDER BY ts;
--- Medido: 3 ms · 11 filas leídas
+-- Medido: 31 ms · 12 filas leídas (1 KB)
 
 
 -- P2 · ¿Cómo de grave es? Errores y latencia de cada servicio, ahora frente a hace una hora
 SELECT
     service,
-    round(100 * sumIf(errors, minute >= '2026-11-27 14:05:00' AND minute < '2026-11-27 14:15:00')
-              / sumIf(requests, minute >= '2026-11-27 14:05:00' AND minute < '2026-11-27 14:15:00'), 2)          AS error_pct_now,
-    round(100 * sumIf(errors, minute >= '2026-11-27 13:05:00' AND minute < '2026-11-27 13:15:00')
-              / sumIf(requests, minute >= '2026-11-27 13:05:00' AND minute < '2026-11-27 13:15:00'), 2)          AS error_pct_before,
-    round(quantilesTDigestMergeIf(0.5, 0.95, 0.99)(latency, minute >= '2026-11-27 14:05:00' AND minute < '2026-11-27 14:15:00')[3] / 1e6) AS p99_ms_now,
-    round(quantilesTDigestMergeIf(0.5, 0.95, 0.99)(latency, minute >= '2026-11-27 13:05:00' AND minute < '2026-11-27 13:15:00')[3] / 1e6) AS p99_ms_before
+    round(100 * sumIf(errors, minute >= pf_at('14:05') AND minute < pf_at('14:15'))
+              / sumIf(requests, minute >= pf_at('14:05') AND minute < pf_at('14:15')), 2)          AS error_pct_now,
+    round(100 * sumIf(errors, minute >= pf_at('13:05') AND minute < pf_at('13:15'))
+              / sumIf(requests, minute >= pf_at('13:05') AND minute < pf_at('13:15')), 2)          AS error_pct_before,
+    round(quantilesTDigestMergeIf(0.5, 0.95, 0.99)(latency, minute >= pf_at('14:05') AND minute < pf_at('14:15'))[3] / 1e6) AS p99_ms_now,
+    round(quantilesTDigestMergeIf(0.5, 0.95, 0.99)(latency, minute >= pf_at('13:05') AND minute < pf_at('13:15'))[3] / 1e6) AS p99_ms_before
 FROM payflow_sre.red_1m
 GROUP BY service
 ORDER BY error_pct_now DESC;
--- Medido: 68 ms · 20 160 filas leídas (3 MB)
+-- Medido: 139 ms · 721 414 filas leídas (102,8 MB) · 337,8 MB de memoria
 -- Qué observar: fallan tres servicios (api-gateway, checkout, payment). ¿Quién es la causa
 -- y quién solo propaga el error?
 
@@ -37,17 +37,17 @@ ORDER BY error_pct_now DESC;
 --  Un span que ha fallado sin que ninguno de sus hijos falle es donde nació el error.
 SELECT ServiceName, SpanName, StatusMessage, count() AS failed_traces
 FROM payflow_otel.otel_traces AS s
-WHERE Timestamp BETWEEN '2026-11-27 14:05:00' AND '2026-11-27 14:15:00'
+WHERE Timestamp BETWEEN pf_at('14:05') AND pf_at('14:15')
   AND StatusCode = 'Error'
   AND SpanId NOT IN
   (
       SELECT ParentSpanId FROM payflow_otel.otel_traces
-      WHERE Timestamp BETWEEN '2026-11-27 14:04:00' AND '2026-11-27 14:16:00' AND StatusCode = 'Error'
+      WHERE Timestamp BETWEEN pf_at('14:04') AND pf_at('14:16') AND StatusCode = 'Error'
   )
 GROUP BY ServiceName, SpanName, StatusMessage
 ORDER BY failed_traces DESC
 LIMIT 5;
--- Medido: 209 ms · 1,6 M filas leídas (17,7 MB) · 56,3 MB de memoria
+-- Medido: 705 ms · 1,6 M filas leídas (17,3 MB) · 66 MB de memoria
 -- Qué observar: la llamada a la base de datos de payment, "Connection is not available,
 -- request timed out after 3000ms". Los demás son víctimas.
 
@@ -57,12 +57,12 @@ LIMIT 5;
 WITH RECURSIVE
     (SELECT TraceId FROM payflow_otel.otel_traces
      WHERE ServiceName = 'api-gateway' AND SpanName = 'POST /v1/payments' AND StatusCode = 'Error'
-       AND Timestamp BETWEEN '2026-11-27 14:10:00' AND '2026-11-27 14:10:01' LIMIT 1) AS tid,
+       AND Timestamp BETWEEN pf_at('14:10') AND pf_at('14:10:01') LIMIT 1) AS tid,
     spans AS
     (
         SELECT SpanId, ParentSpanId, ServiceName, SpanName, Timestamp, Duration, StatusCode
         FROM payflow_otel.otel_traces
-        WHERE TraceId = tid AND Timestamp BETWEEN '2026-11-27 14:09:55' AND '2026-11-27 14:10:10'
+        WHERE TraceId = tid AND Timestamp BETWEEN pf_at('14:09:55') AND pf_at('14:10:10')
     ),
     tree AS
     (
@@ -80,7 +80,7 @@ SELECT
     StatusCode                                                                                 AS status
 FROM tree
 ORDER BY Timestamp;
--- Medido: 128 ms · 638 998 filas leídas (34,9 MB)
+-- Medido: 1,66 s · 638 999 filas leídas (34,2 MB)
 -- Qué observar: la cascada (waterfall) del módulo 3, en SQL a secas. 3 segundos esperando
 -- en INSERT payflow.payments; la red de tarjetas, ledger y notification nunca se ejecutaron.
 
@@ -94,18 +94,18 @@ SELECT
     dictGet('payflow_inventory.dict_deployment', 'change_id', ServiceName, toDateTime(Timestamp)) AS change_live,
     count()                                                                                    AS error_spans
 FROM payflow_otel.otel_traces
-WHERE StatusCode = 'Error' AND SpanKind = 'Client' AND SpanAttributes['rpc.system'] = '' AND toDate(Timestamp) = '2026-11-27'
+WHERE StatusCode = 'Error' AND SpanKind = 'Client' AND SpanAttributes['rpc.system'] = '' AND toDate(Timestamp) = pf_black_friday()
 GROUP BY team, ServiceName, change_live
 ORDER BY error_spans DESC
 LIMIT 5;
--- Medido: 379 ms · 21,5 M filas leídas (63,4 MB) · 137,6 MB de memoria
+-- Medido: 227 ms · 21,5 M filas leídas (62 MB) · 146,4 MB de memoria
 -- Qué observar: el equipo payments, cambio CHG-4117. Avisa primero al equipo correcto.
 
 SELECT deployment, version, change_id, author, valid_from, note
 FROM payflow_inventory.deployment_history
-WHERE valid_from BETWEEN '2026-11-27 12:00:00' AND '2026-11-27 16:00:00'
+WHERE valid_from BETWEEN pf_at('12:00') AND pf_at('16:00')
 ORDER BY valid_from;
--- Medido: 3 ms · 11 filas leídas
+-- Medido: 6 ms · 17 filas leídas (1,2 KB)
 
 SELECT
     ResourceAttributes['service.version']           AS pod_version,
@@ -114,9 +114,9 @@ SELECT
     round(quantile(0.99)(Duration) / 1e6)           AS p99_ms
 FROM payflow_otel.otel_traces
 WHERE ServiceName = 'payment' AND SpanName = 'INSERT payflow.payments'
-  AND Timestamp BETWEEN '2026-11-27 13:58:00' AND '2026-11-27 14:42:00'
+  AND Timestamp BETWEEN pf_at('13:58') AND pf_at('14:42')
 GROUP BY pod_version;
--- Medido: 21 ms · 81 920 filas leídas (1,9 MB)
+-- Medido: 142 ms · 65 537 filas leídas (1,6 MB)
 -- Qué observar: durante el despliegue progresivo (rollout) las dos versiones sirvieron
 -- tráfico a la vez. Solo falla v2.4.1. Misma base, mismo tráfico: la causa es la versión.
 
@@ -130,10 +130,10 @@ SELECT
     round(avgIf(Value, MetricName = 'hikaricp.connections.pending'), 1)                  AS waiting
 FROM payflow_otel.otel_metrics_gauge
 WHERE ServiceName = 'payment' AND MetricName LIKE 'hikaricp.%'
-  AND TimeUnix BETWEEN '2026-11-27 13:40:00' AND '2026-11-27 15:00:00'
+  AND TimeUnix BETWEEN pf_at('13:40') AND pf_at('15:00')
 GROUP BY t, version
 ORDER BY t, version;
--- Medido: 15 ms · 57 344 filas leídas (2,7 MB)
+-- Medido: 200 ms · 49 153 filas leídas (2,5 MB)
 -- Qué observar: v2.4.1 tiene 10 conexiones, todas ocupadas, y decenas de hilos esperando.
 
 
@@ -141,10 +141,10 @@ ORDER BY t, version;
 SELECT Timestamp, ResourceAttributes['k8s.pod.name'] AS pod, Body
 FROM payflow_otel.otel_logs
 WHERE ServiceName = 'payment' AND hasToken(lower(Body), 'maximumpoolsize')
-  AND Timestamp BETWEEN '2026-11-27 13:55:00' AND '2026-11-27 14:50:00'
+  AND Timestamp BETWEEN pf_at('13:55') AND pf_at('14:50')
 ORDER BY Timestamp
 LIMIT 4;
--- Medido: 10 ms · 40 960 filas leídas (1,5 MB)
+-- Medido: 699 ms · 40 961 filas leídas (1,5 MB)
 -- Qué observar: maximumPoolSize=10 a las 13:58, maximumPoolSize=50 tras la marcha atrás
 -- (rollback). La nota del cambio decía "pool size 50 to 10": la revisión no tuvo en
 -- cuenta la carga de Black Friday.
@@ -160,18 +160,18 @@ WHERE (ServiceName = 'k8s-events' AND ResourceAttributes['k8s.node.name'] = 'ip-
    OR (ServiceName = 'fraud-scoring' AND SeverityNumber >= 13 AND Body NOT LIKE 'score=%')
 ORDER BY Timestamp
 LIMIT 20;
--- Medido: 363 ms · 5 M filas leídas (400,1 MB) · 283,1 MB de memoria
+-- Medido: 970 ms · 25,1 M filas leídas (2 GB) · 401,9 MB de memoria
 
 SELECT
     toStartOfMinute(toDateTime(TimeUnix))                         AS minute,
     round(max(Value) / 1048576)                                   AS memory_mib
 FROM payflow_otel.otel_metrics_gauge
-WHERE MetricName = 'k8s.pod.memory.working_set'
+WHERE MetricName = 'k8s.pod.memory.usage'
   AND ResourceAttributes['k8s.node.name'] = 'ip-10-0-3-17' AND ServiceName = 'fraud-scoring'
-  AND TimeUnix BETWEEN '2026-11-27 14:00:00' AND '2026-11-27 14:30:00'
+  AND TimeUnix BETWEEN pf_at('14:00') AND pf_at('14:30')
 GROUP BY minute
 ORDER BY minute WITH FILL STEP INTERVAL 1 MINUTE;
--- Medido: 12 ms · 32 768 filas leídas (1,9 MB)
+-- Medido: 98 ms · 8 193 filas leídas (466,7 KB)
 -- Qué observar: la memoria sube hasta 2 GiB, cae a 0 a las 14:21 (matado) y vuelve a arrancar.
 
 
@@ -182,8 +182,8 @@ SELECT
     uniqExact(SpanAttributes['merchant.id'])                                           AS merchants_hit
 FROM payflow_otel.otel_traces
 WHERE ServiceName = 'payment' AND SpanName = 'payment.AuthorizePayment' AND SpanAttributes['payment.status'] = 'failed'
-  AND Timestamp BETWEEN '2026-11-27 13:58:00' AND '2026-11-27 14:50:00';
--- Medido: 80 ms · 90 112 filas leídas (3 MB)
+  AND Timestamp BETWEEN pf_at('13:58') AND pf_at('14:50');
+-- Medido: 144 ms · 73 729 filas leídas (2,8 MB)
 
 SELECT
     dictGet('payflow_inventory.dict_merchant', 'name', SpanAttributes['merchant.id'])          AS merchant,
@@ -192,11 +192,11 @@ SELECT
     round(sum(toFloat64(SpanAttributes['payment.amount'])))                              AS amount_eur
 FROM payflow_otel.otel_traces
 WHERE ServiceName = 'payment' AND SpanName = 'payment.AuthorizePayment' AND SpanAttributes['payment.status'] = 'failed'
-  AND Timestamp BETWEEN '2026-11-27 13:58:00' AND '2026-11-27 14:50:00'
+  AND Timestamp BETWEEN pf_at('13:58') AND pf_at('14:50')
 GROUP BY merchant, tier
 ORDER BY amount_eur DESC
 LIMIT 10;
--- Medido: 38 ms · 90 112 filas leídas (3 MB)
+-- Medido: 42 ms · 73 729 filas leídas (2,8 MB)
 -- Qué observar: las cifras de cara al cliente para el informe del incidente.
 -- Los gestores de cuenta saben a quién llamar primero.
 
@@ -206,21 +206,22 @@ SELECT ts, source, what
 FROM
 (
     SELECT valid_from AS ts, 'deploy' AS source, concat(deployment, ' ', version, ' (', change_id, ', ', author, ')') AS what
-    FROM payflow_inventory.deployment_history WHERE valid_from BETWEEN '2026-11-27 13:00:00' AND '2026-11-27 15:00:00'
+    FROM payflow_inventory.deployment_history WHERE valid_from BETWEEN pf_at('13:00') AND pf_at('15:00')
     UNION ALL
-    SELECT ts, concat('alert ', state), concat(rule, ': ', summary) FROM payflow_sre.alerts
+    SELECT ts, concat('alert ', state), concat(rule, ': ', summary) FROM payflow_sre.alerts WHERE ts BETWEEN pf_at('13:00') AND pf_at('15:00')
     UNION ALL
     SELECT min(toDateTime(Timestamp)), 'first error log', any(Body) FROM payflow_otel.otel_logs
-    WHERE hasToken(lower(Body), 'hikaripool') AND SeverityText = 'ERROR'
+    WHERE hasToken(lower(Body), 'hikaripool') AND SeverityText = 'ERROR' AND toDate(Timestamp) = pf_black_friday()
     UNION ALL
     SELECT max(toDateTime(Timestamp)), 'last error log', any(Body) FROM payflow_otel.otel_logs
-    WHERE hasToken(lower(Body), 'hikaripool') AND SeverityText = 'ERROR'
+    WHERE hasToken(lower(Body), 'hikaripool') AND SeverityText = 'ERROR' AND toDate(Timestamp) = pf_black_friday()
     UNION ALL
     SELECT toDateTime(Timestamp), 'k8s', concat(EventName, ': ', Body) FROM payflow_otel.otel_logs
     WHERE ServiceName = 'k8s-events' AND SeverityText = 'WARN' AND EventName != 'Unhealthy'
+      AND Timestamp BETWEEN pf_at('13:00') AND pf_at('15:00')
 )
 ORDER BY ts;
--- Medido: 203 ms · 4,5 M filas leídas (32,6 MB) · 180,1 MB de memoria
+-- Medido: 76 ms · 3,2 M filas leídas (31,4 MB) · 184,5 MB de memoria
 -- Qué observar: despliegue 13:58, primer error 13:58, aviso 14:00, OOM 14:21,
 -- marcha atrás 14:42, último error 14:44, resuelto 14:47. Tiempo de detección: 2 minutos.
 -- Tiempo de mitigación: 44 minutos. El postmortem se escribe solo.
@@ -229,12 +230,12 @@ ORDER BY ts;
 -- Checkpoint
 SELECT
     if((SELECT argMax(SpanName, c) FROM (SELECT SpanName, count() AS c FROM payflow_otel.otel_traces
-        WHERE StatusCode = 'Error' AND Timestamp BETWEEN '2026-11-27 14:05:00' AND '2026-11-27 14:15:00' AND SpanKind = 'Client'
+        WHERE StatusCode = 'Error' AND Timestamp BETWEEN pf_at('14:05') AND pf_at('14:15') AND SpanKind = 'Client'
           AND SpanAttributes['rpc.system'] = ''
         GROUP BY SpanName)) = 'INSERT payflow.payments', 'OK', 'KO')                                                   AS root_cause_span,
     if((SELECT count() FROM payflow_otel.otel_logs WHERE hasToken(lower(Body), 'maximumpoolsize') AND Body LIKE '%maximumPoolSize=10%') = 6, 'OK', 'KO') AS startup_clue,
     if((SELECT countIf(StatusCode = 'Error') FROM payflow_otel.otel_traces
         WHERE ServiceName = 'payment' AND SpanName = 'INSERT payflow.payments'
-          AND ResourceAttributes['service.version'] = 'v2.4.0' AND Timestamp BETWEEN '2026-11-27 13:58:00' AND '2026-11-27 14:42:00') = 0, 'OK', 'KO') AS only_v241_fails
+          AND ResourceAttributes['service.version'] = 'v2.4.0' AND Timestamp BETWEEN pf_at('13:58') AND pf_at('14:42')) = 0, 'OK', 'KO') AS only_v241_fails
 SETTINGS select_sequential_consistency = 1;
--- Medido: 111 ms · 884 737 filas leídas (6,1 MB) · 58,2 MB de memoria
+-- Medido: 509 ms · 901 152 filas leídas (6,1 MB) · 64,9 MB de memoria
