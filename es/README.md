@@ -1,8 +1,14 @@
 # ClickHouse de cero a avanzado · Taller de observabilidad
 
-Black Friday en **PayFlow**, una plataforma de pagos que corre sobre Kubernetes. A las 13:58 una nueva versión reduce el pool de conexiones a la base de datos de 50 a 10. Los pagos empiezan a fallar, los reintentos se acumulan, un pod muere por falta de memoria. Recoges todas las señales de ese día en **tu propio servicio ClickHouse Cloud**, las exploras en **ClickStack** (búsqueda, dashboards, alertas, mapa de servicios, event patterns, AI notebooks) y ves por debajo, en SQL, cómo funciona cada funcionalidad.
+**PayFlow** es una plataforma de pagos que corre sobre Kubernetes. Su último mes de telemetría termina hoy, y el viernes pasado fue Black Friday: a las 13:58 una nueva versión redujo el pool de conexiones a la base de datos de 50 a 10. Los pagos fallaron, los reintentos se acumularon, un pod murió por falta de memoria. Recoges todas las señales de ese mes en **tu propio servicio ClickHouse Cloud**, las exploras en **ClickStack** (búsqueda, dashboards, alertas, mapa de servicios, event patterns, AI notebooks) y ves por debajo, en SQL, cómo funciona cada funcionalidad.
 
-Logs, trazas, métricas y eventos de Kubernetes están **simulados en SQL**: sin colector, sin generador de carga, nada que instalar. Siguen exactamente el esquema OpenTelemetry del exportador de ClickHouse, así que ClickStack los lee como si los hubiera escrito un colector real. Todo es determinista: todo el mundo obtiene las mismas cifras. Un flujo en directo reproduce tráfico cada minuto, y un interruptor te permite romper producción a propósito.
+Logs, trazas, métricas y eventos de Kubernetes están **simulados en SQL**: sin colector, sin generador de carga, nada que instalar. Siguen exactamente el esquema OpenTelemetry del exportador de ClickHouse, así que ClickStack los lee como si los hubiera escrito un colector real. El taller no tiene fecha fija: lo ejecutes cuando lo ejecutes, los datos cubren los últimos 30 días hasta el minuto actual, y Black Friday es el último viernes antes de hoy. Todo lo demás es determinista: todo el mundo obtiene el mismo incidente y las mismas cifras. Un flujo en directo va añadiendo el minuto actual, y un interruptor te permite romper producción a propósito.
+
+| | Volumen |
+|---|---|
+| Un día ordinario | unas 110 000 peticiones, 1,7 millones de spans, 600 000 líneas de log (una cuarta parte menos el fin de semana) |
+| Black Friday | 1,4 millones de peticiones, 21,5 millones de spans, 7,8 millones de líneas de log |
+| El mes | unos 70 millones de spans, 25 millones de líneas de log, 25 millones de puntos de métricas; se carga en unos 8 minutos |
 
 ---
 
@@ -74,17 +80,17 @@ flowchart LR
    | Región | AWS **eu-central-1** (o la más cercana a ti) | |
    | Réplicas | **3** | los grandes escaneos se reparten entre las 3 (módulo 7) |
    | Memoria por réplica | **64 GB** (16 vCPU), **mínimo = máximo** | tamaño fijo: sin esperar al autoescalado durante una demo |
-   | Reposo (idling) | **tras 1 hora** de inactividad, como mínimo | el servicio no se duerme durante una pausa |
+   | Reposo (idling) | **tras 1 hora** de inactividad, como mínimo | el servicio no se duerme durante una pausa; el flujo en directo no lo mantiene despierto |
 
    Coste orientativo: unos 11 $ por hora como máximo con este tamaño, menos de 70 $ la jornada. La calculadora de [clickhouse.com/pricing](https://clickhouse.com/pricing) da la tarifa exacta.
-3. **Abre la consola SQL** del servicio y ejecuta `SELECT version()`. Después abre una vez **ClickStack** desde el menú de la izquierda, para comprobar que está disponible en tu servicio.
+3. **Abre la consola SQL** del servicio y ejecuta `SELECT version()`. Después abre una vez **ClickStack** desde el menú de la izquierda, para comprobar que está disponible en tu servicio. El módulo 3 te guía por ClickStack desde el primer clic: no hace falta saber nada antes.
 4. Opcional, para ponerte al día desde la línea de comandos: instala el cliente nativo (`curl https://clickhouse.com/ | sh`).
 
 Cada archivo SQL se ejecuta en la consola SQL, instrucción por instrucción o todo de una vez. Ninguna instrucción pasa de 60 segundos. Cada archivo termina con un checkpoint que debe mostrar `OK` en todas partes. Cada módulo con una parte en ClickStack tiene un README con los pasos en la interfaz.
 
 ---
 
-## Programa (5 horas)
+## Programa (5 h 30)
 
 | Hora | Módulo | ClickStack | El SQL por debajo | Duración |
 |---|---|---|---|---|
@@ -94,11 +100,11 @@ Cada archivo SQL se ejecuta en la consola SQL, instrucción por instrucción o t
 | 1:15 | **03** Búsqueda y correlación | sources, búsqueda Lucene y SQL, saved search, live tail, del log a la traza y al pod; tres investigaciones, desde un log, una alerta de métrica, una traza | los índices de texto, EXPLAIN, los tres escenarios en SQL | 45 min |
 | 2:00 | pausa | | | 10 min |
 | 2:10 | **04** Dashboards | Chart Explorer, un dashboard con filtros, release markers, drilldown al hacer clic en una fila, tiles SQL, presets, text-to-chart | agregados RED (spanmetrics), el histograma de latencia con exemplars | 35 min |
-| 2:45 | **05** SLO y alertas | alertas de búsqueda, de gráfico y SQL, un webhook; **rompe producción y recibe el aviso** | presupuesto de errores, tasa de consumo (burn rate), alertas multiventana | 30 min |
-| 3:15 | **06** Investigación | service map, event patterns, event deltas, release markers, Infrastructure tab | las 10 preguntas, la traza como árbol, el coste del incidente | 40 min |
-| 3:55 | pausa | | | 10 min |
-| 4:05 | **07** Escala y coste | un agregado (rollup) registrado en la source | 875 M de líneas de log: índice de texto, bloom filter, proyección, cachés, 3 réplicas; retención, muestreo, dimensionamiento | 35 min |
-| 4:40 | **08** IA y gobernanza | AI notebooks, MCP, RBAC | ClickHouse Agents, row policies, borrado RGPD, una API de estado | 20 min |
+| 2:45 | **05** SLO y alertas | alertas de búsqueda, de Chart Explorer y de tile SQL, email o webhook, umbrales elegidos sobre los datos; **rompe producción y recibe el aviso** | presupuesto de errores, tasa de consumo (burn rate), alertas multiventana | 35 min |
+| 3:20 | **06** Investigación | service map, event patterns, event deltas, release markers, pestaña Infrastructure, AI notebook | las 10 preguntas, la traza como árbol, el coste del incidente | 45 min |
+| 4:05 | pausa | | | 10 min |
+| 4:15 | **07** Escala y coste | un agregado (rollup) registrado en la source, la etiqueta ACCELERATED | 875 M de líneas de log: índice de texto, bloom filter, proyección, cachés, 3 réplicas; retención, muestreo, dimensionamiento | 35 min |
+| 4:50 | **08** IA y gobernanza | AI notebooks, MCP, RBAC con reglas finas, exportación a Terraform | ClickHouse Agents, row policies, borrado RGPD, una API de estado | 40 min |
 
 ---
 
@@ -108,8 +114,8 @@ Cada archivo SQL se ejecuta en la consola SQL, instrucción por instrucción o t
 
 ```bash
 cd es
-export CH_HOST=<tu-servicio>.<region>.clickhouse.cloud
-export CH_PASSWORD='<contraseña>'
+export CH_HOST=<your-service>.<region>.clickhouse.cloud
+export CH_PASSWORD='<password>'
 ```
 
 ```bash
@@ -125,9 +131,9 @@ Retoma desde un módulo hasta el final.
 ```bash
 ./run_all.sh
 ```
-Todo desde cero, reset incluido: unos 10 minutos.
+Todo desde cero, reset incluido: unos 15 minutos. Los datos se generan para el día en que lo ejecutas.
 
-Al final de la jornada, ejecuta `detener_flujo_en_directo.sql`: el flujo en directo se refresca cada minuto y mantiene el servicio despierto. `reset.sql` borra solo lo que ha creado el taller: las bases de datos `payflow_*`, el usuario y los roles, y las funciones `pf_*`.
+Al final de la jornada, ejecuta `detener_flujo_en_directo.sql`: el flujo en directo ejecuta el simulador cada minuto. `reset.sql` borra solo lo que ha creado el taller: las bases de datos `payflow_*`, el usuario y los roles, y las funciones `pf_*`.
 
 ---
 

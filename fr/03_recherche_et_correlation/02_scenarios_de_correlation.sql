@@ -26,10 +26,10 @@
 --  LogAttributeItems transforme chaque paire en 'clé=valeur' : son index texte répond au filtre.
 SELECT Timestamp, ServiceName, Body, LogAttributes['payment_id'] AS payment_id, TraceId
 FROM payflow_otel.otel_logs
-WHERE Timestamp BETWEEN '2026-11-27 14:00:00' AND '2026-11-27 14:15:00'
+WHERE Timestamp BETWEEN pf_at('14:00') AND pf_at('14:15')
   AND has(LogAttributeItems, 'merchant_id=m_16523')
   AND SeverityText = 'ERROR';
--- Mesuré : 15 ms · 49 152 lignes lues (2 Mo)
+-- Mesuré : 20 ms · 65 537 lignes lues (2 Mo)
 -- À observer : une ligne, "payment failed: payment service returned 503", et son TraceId.
 -- checkout ne fait que relayer l'erreur d'un autre service : le log ne dit pas pourquoi.
 
@@ -38,7 +38,7 @@ WHERE Timestamp BETWEEN '2026-11-27 14:00:00' AND '2026-11-27 14:15:00'
 --  le scan d'otel_traces est borné à quelques secondes au lieu de la journée entière.
 WITH
     (SELECT min(TraceId) FROM payflow_otel.otel_logs
-     WHERE Timestamp BETWEEN '2026-11-27 14:00:00' AND '2026-11-27 14:15:00'
+     WHERE Timestamp BETWEEN pf_at('14:00') AND pf_at('14:15')
        AND has(LogAttributeItems, 'merchant_id=m_16523') AND SeverityText = 'ERROR') AS tid,
     (SELECT (min(Start), max(End)) FROM payflow_otel.otel_traces_trace_id_ts WHERE TraceId = tid) AS bounds
 SELECT
@@ -49,7 +49,7 @@ SELECT
 FROM payflow_otel.otel_traces
 WHERE TraceId = tid AND Timestamp BETWEEN bounds.1 AND bounds.2 + INTERVAL 1 SECOND
 ORDER BY Timestamp;
--- Mesuré : 206 ms · 106 496 lignes lues (6,6 Mo)
+-- Mesuré : 56 ms · 106 497 lignes lues (6 Mo)
 -- À observer : l'erreur naît dans payment, sur INSERT payflow.payments : 3 secondes à
 -- attendre une connexion, "HikariPool-1 - Connection is not available". La colonne pod
 -- nomme le pod payment qui a servi la requête : l'étape suivante regarde ses métriques.
@@ -58,11 +58,11 @@ ORDER BY Timestamp;
 --  Le même nom de pod est un attribut de ressource des jauges (kubeletstats et HikariCP).
 WITH
     (SELECT min(TraceId) FROM payflow_otel.otel_logs
-     WHERE Timestamp BETWEEN '2026-11-27 14:00:00' AND '2026-11-27 14:15:00'
+     WHERE Timestamp BETWEEN pf_at('14:00') AND pf_at('14:15')
        AND has(LogAttributeItems, 'merchant_id=m_16523') AND SeverityText = 'ERROR') AS tid,
     (SELECT argMax(ResourceAttributes['k8s.pod.name'], Timestamp) FROM payflow_otel.otel_traces
      WHERE TraceId = tid AND StatusCode = 'Error'
-       AND Timestamp BETWEEN '2026-11-27 14:00:00' AND '2026-11-27 14:15:00') AS failing_pod
+       AND Timestamp BETWEEN pf_at('14:00') AND pf_at('14:15')) AS failing_pod
 SELECT
     toStartOfMinute(toDateTime(TimeUnix))                                        AS minute,
     failing_pod                                                                  AS pod,
@@ -71,11 +71,11 @@ SELECT
     round(avgIf(Value, MetricName = 'hikaricp.connections.max'))                 AS pool_max,
     round(avgIf(Value, MetricName = 'hikaricp.connections.pending'))             AS pool_pending
 FROM payflow_otel.otel_metrics_gauge
-WHERE TimeUnix BETWEEN '2026-11-27 14:05:00' AND '2026-11-27 14:10:59'
+WHERE TimeUnix BETWEEN pf_at('14:05') AND pf_at('14:10:59')
   AND ResourceAttributes['k8s.pod.name'] = failing_pod
 GROUP BY minute
 ORDER BY minute;
--- Mesuré : 52 ms · 139 264 lignes lues (6 Mo)
+-- Mesuré : 59 ms · 190 913 lignes lues (9,7 Mo)
 -- À observer : le pod ne travaille pas (CPU bas). Son pool est plein (active = max) et
 -- des dizaines de requêtes attendent une connexion. Et le pool max vaut 10, pas 50.
 
@@ -83,17 +83,17 @@ ORDER BY minute;
 --  Pourquoi 10 ? Le pod écrit la configuration de son pool au démarrage.
 WITH
     (SELECT min(TraceId) FROM payflow_otel.otel_logs
-     WHERE Timestamp BETWEEN '2026-11-27 14:00:00' AND '2026-11-27 14:15:00'
+     WHERE Timestamp BETWEEN pf_at('14:00') AND pf_at('14:15')
        AND has(LogAttributeItems, 'merchant_id=m_16523') AND SeverityText = 'ERROR') AS tid,
     (SELECT argMax(ResourceAttributes['k8s.pod.name'], Timestamp) FROM payflow_otel.otel_traces
      WHERE TraceId = tid AND StatusCode = 'Error'
-       AND Timestamp BETWEEN '2026-11-27 14:00:00' AND '2026-11-27 14:15:00') AS failing_pod
+       AND Timestamp BETWEEN pf_at('14:00') AND pf_at('14:15')) AS failing_pod
 SELECT Timestamp, ResourceAttributes['service.version'] AS version, Body
 FROM payflow_otel.otel_logs
-WHERE Timestamp BETWEEN '2026-11-27 13:50:00' AND '2026-11-27 14:10:00'
+WHERE Timestamp BETWEEN pf_at('13:50') AND pf_at('14:10')
   AND ResourceAttributes['k8s.pod.name'] = failing_pod
   AND hasAllTokens(lower(Body), ['maximumpoolsize']);
--- Mesuré : 46 ms · 90 112 lignes lues (4,6 Mo)
+-- Mesuré : 52 ms · 90 113 lignes lues (4,8 Mo)
 -- À observer : "maximumPoolSize=10", écrit par un pod v2.4.1 démarré quelques minutes
 -- avant le ticket. Un identifiant de marchand a mené à la version qui a cassé les paiements.
 
@@ -115,18 +115,18 @@ SELECT
     max(Value)                                     AS max_pending
 FROM payflow_otel.otel_metrics_gauge
 WHERE MetricName = 'hikaricp.connections.pending'
-  AND TimeUnix BETWEEN '2026-11-27 12:00:00' AND '2026-11-27 16:00:00'
+  AND TimeUnix BETWEEN pf_at('12:00') AND pf_at('16:00')
   AND Value > 20
 GROUP BY minute
 ORDER BY minute
 LIMIT 5;
--- Mesuré : 12 ms · 90 112 lignes lues (3,4 Mo)
+-- Mesuré : 16 ms · 114 689 lignes lues (3,4 Mo)
 -- À observer : elle se déclenche à 14h03, sur les 6 pods payment à la fois. Un problème
 -- sur tous les pods en même temps est rarement une panne matérielle : pensez changement.
 
 -- ÉTAPE B2 · La métrique en contexte : le pool de chaque version, avant et pendant
 SELECT
-    if(TimeUnix < '2026-11-27 13:58:00', 'before 13:58', 'at 14:03')               AS period,
+    if(TimeUnix < pf_at('13:58'), 'before 13:58', 'at 14:03')               AS period,
     ResourceAttributes['service.version']                                          AS version,
     count(DISTINCT ResourceAttributes['k8s.pod.name'])                             AS pods,
     round(avgIf(Value, MetricName = 'hikaricp.connections.max'))                   AS pool_max,
@@ -134,11 +134,11 @@ SELECT
     round(avgIf(Value, MetricName = 'hikaricp.connections.pending'), 1)            AS pool_pending
 FROM payflow_otel.otel_metrics_gauge
 WHERE MetricName LIKE 'hikaricp.%'
-  AND (TimeUnix BETWEEN '2026-11-27 13:50:00' AND '2026-11-27 13:52:59'
-       OR TimeUnix BETWEEN '2026-11-27 14:03:00' AND '2026-11-27 14:03:59')
+  AND (TimeUnix BETWEEN pf_at('13:50') AND pf_at('13:52:59')
+       OR TimeUnix BETWEEN pf_at('14:03') AND pf_at('14:03:59'))
 GROUP BY period, version
 ORDER BY period DESC, version;
--- Mesuré : 19 ms · 106 496 lignes lues (4,9 Mo)
+-- Mesuré : 25 ms · 131 073 lignes lues (5,3 Mo)
 -- À observer : v2.4.0 avait un pool de 50 et utilisait quelques connexions. v2.4.1 en a 10,
 -- toutes occupées. La métrique désigne déjà la version ; les traces montrent l'effet.
 
@@ -148,7 +148,7 @@ ORDER BY period DESC, version;
 WITH
     (SELECT argMax(ResourceAttributes['k8s.pod.name'], Value) FROM payflow_otel.otel_metrics_gauge
      WHERE MetricName = 'hikaricp.connections.pending'
-       AND TimeUnix BETWEEN '2026-11-27 14:03:00' AND '2026-11-27 14:03:59') AS worst_pod
+       AND TimeUnix BETWEEN pf_at('14:03') AND pf_at('14:03:59')) AS worst_pod
 SELECT
     worst_pod                                                      AS pod,
     SpanName,
@@ -158,12 +158,12 @@ SELECT
     round(max(Duration) / 1e6)                                     AS max_ms,
     argMinIf(TraceId, Timestamp, StatusCode = 'Error')             AS first_failed_trace
 FROM payflow_otel.otel_traces
-WHERE Timestamp BETWEEN '2026-11-27 14:03:00' AND '2026-11-27 14:03:59'
+WHERE Timestamp BETWEEN pf_at('14:03') AND pf_at('14:03:59')
   AND ServiceName = 'payment' AND SpanKind = 'Server'
   AND ResourceAttributes['k8s.pod.name'] = worst_pod
 GROUP BY SpanName
 ORDER BY spans DESC;
--- Mesuré : 34 ms · 237 568 lignes lues (5,5 Mo)
+-- Mesuré : 34 ms · 253 953 lignes lues (5,1 Mo)
 -- À observer : une médiane au-dessus d'une seconde et des échecs à 3 secondes, le timeout
 -- de HikariCP. first_failed_trace est l'identifiant de la trace à ouvrir.
 
@@ -171,17 +171,17 @@ ORDER BY spans DESC;
 WITH
     (SELECT argMax(ResourceAttributes['k8s.pod.name'], Value) FROM payflow_otel.otel_metrics_gauge
      WHERE MetricName = 'hikaricp.connections.pending'
-       AND TimeUnix BETWEEN '2026-11-27 14:03:00' AND '2026-11-27 14:03:59') AS worst_pod,
+       AND TimeUnix BETWEEN pf_at('14:03') AND pf_at('14:03:59')) AS worst_pod,
     (SELECT argMinIf(TraceId, Timestamp, StatusCode = 'Error') FROM payflow_otel.otel_traces
-     WHERE Timestamp BETWEEN '2026-11-27 14:03:00' AND '2026-11-27 14:03:59'
+     WHERE Timestamp BETWEEN pf_at('14:03') AND pf_at('14:03:59')
        AND ServiceName = 'payment' AND SpanKind = 'Server'
        AND ResourceAttributes['k8s.pod.name'] = worst_pod) AS tid
 SELECT Timestamp, ServiceName, SeverityText, Body
 FROM payflow_otel.otel_logs
 WHERE TraceId = tid
-  AND Timestamp BETWEEN '2026-11-27 14:02:50' AND '2026-11-27 14:04:20'
+  AND Timestamp BETWEEN pf_at('14:02:50') AND pf_at('14:04:20')
 ORDER BY Timestamp;
--- Mesuré : 37 ms · 81 920 lignes lues (5,9 Mo)
+-- Mesuré : 35 ms · 49 153 lignes lues (3,9 Mo)
 -- À observer : la même requête vue par trois services : payment expire sur le pool,
 -- checkout signale une 503, le log d'accès de l'api-gateway renvoie la 503 au marchand.
 
@@ -190,14 +190,14 @@ ORDER BY Timestamp;
 WITH
     (SELECT argMax(ResourceAttributes['k8s.pod.name'], Value) FROM payflow_otel.otel_metrics_gauge
      WHERE MetricName = 'hikaricp.connections.pending'
-       AND TimeUnix BETWEEN '2026-11-27 14:03:00' AND '2026-11-27 14:03:59') AS worst_pod
+       AND TimeUnix BETWEEN pf_at('14:03') AND pf_at('14:03:59')) AS worst_pod
 SELECT Timestamp, EventName, Body
 FROM payflow_otel.otel_logs
 WHERE ServiceName = 'k8s-events'
-  AND Timestamp BETWEEN '2026-11-27 13:50:00' AND '2026-11-27 14:03:00'
+  AND Timestamp BETWEEN pf_at('13:50') AND pf_at('14:03')
   AND (LogAttributes['k8s.object.name'] = worst_pod OR EventName = 'ScalingReplicaSet')
 ORDER BY Timestamp;
--- Mesuré : 31 ms · 2,7 M lignes lues (9,8 Mo) · 155,6 Mo de mémoire
+-- Mesuré : 34 ms · 2,9 M lignes lues (7,4 Mo) · 179,2 Mo de mémoire
 -- À observer : "Scaled up replica set payment-5c8b7f9d21 (rolling update CHG-4117)",
 -- puis le pod planifié, son image v2.4.1 téléchargée, démarré. De l'alerte au changement
 -- en 5 requêtes.
@@ -216,19 +216,19 @@ ORDER BY Timestamp;
 SELECT ServiceName, SpanName, StatusMessage,
        count() AS error_spans, min(Timestamp) AS first_seen, max(Timestamp) AS last_seen
 FROM payflow_otel.otel_traces
-WHERE toDate(Timestamp) = '2026-11-27' AND Timestamp < '2026-11-27 14:25:00'
+WHERE toDate(Timestamp) = pf_black_friday() AND Timestamp < pf_at('14:25')
   AND StatusCode = 'Error' AND SpanKind = 'Server' AND StatusMessage != ''
 GROUP BY ServiceName, SpanName, StatusMessage
-HAVING first_seen >= '2026-11-27 14:15:00'
+HAVING first_seen >= pf_at('14:15')
 ORDER BY error_spans DESC;
--- Mesuré : 32 ms · 7,9 M lignes lues (20,5 Mo) · 56 Mo de mémoire
+-- Mesuré : 35 ms · 7,9 M lignes lues (21,1 Mo)
 -- À observer : fraud.ScoreTransaction, "connect: connection refused", 290 spans en moins
 -- d'une minute à partir de 14:21:07. Quelque chose sur fraud-scoring ne répond plus.
 
 -- ÉTAPE C2 · Une de ces traces, span par span
 WITH
     (SELECT argMin(TraceId, Timestamp) FROM payflow_otel.otel_traces
-     WHERE Timestamp BETWEEN '2026-11-27 14:15:00' AND '2026-11-27 14:25:00'
+     WHERE Timestamp BETWEEN pf_at('14:15') AND pf_at('14:25')
        AND ServiceName = 'fraud-scoring' AND StatusCode = 'Error') AS tid,
     (SELECT (min(Start), max(End)) FROM payflow_otel.otel_traces_trace_id_ts WHERE TraceId = tid) AS bounds
 SELECT
@@ -240,7 +240,7 @@ SELECT
 FROM payflow_otel.otel_traces
 WHERE TraceId = tid AND Timestamp BETWEEN bounds.1 AND bounds.2 + INTERVAL 1 SECOND
 ORDER BY Timestamp;
--- Mesuré : 131 ms · 180 224 lignes lues (6,5 Mo)
+-- Mesuré : 54 ms · 172 033 lignes lues (7,4 Mo)
 -- À observer : checkout appelle fraud-scoring, qui échoue aussitôt. Le pod et le nœud
 -- de fraud-scoring sont les pistes suivantes.
 
@@ -248,17 +248,17 @@ ORDER BY Timestamp;
 --  Pas les logs de la trace : ils ne font que répéter l'erreur. Ce que le pod a dit avant.
 WITH
     (SELECT argMin(ResourceAttributes['k8s.pod.name'], Timestamp) FROM payflow_otel.otel_traces
-     WHERE Timestamp BETWEEN '2026-11-27 14:15:00' AND '2026-11-27 14:25:00'
+     WHERE Timestamp BETWEEN pf_at('14:15') AND pf_at('14:25')
        AND ServiceName = 'fraud-scoring' AND StatusCode = 'Error') AS fraud_pod
 SELECT SeverityText, replaceRegexpAll(Body, '[0-9]+([.:/][0-9]+)*', '<n>') AS message,
        count() AS lines, min(Timestamp) AS first_seen
 FROM payflow_otel.otel_logs
-WHERE Timestamp BETWEEN '2026-11-27 14:10:00' AND '2026-11-27 14:22:00'
+WHERE Timestamp BETWEEN pf_at('14:10') AND pf_at('14:22')
   AND ResourceAttributes['k8s.pod.name'] = fraud_pod
   AND SeverityNumber >= 13
 GROUP BY SeverityText, message
 ORDER BY first_seen;
--- Mesuré : 64 ms · 3,5 M lignes lues (129,6 Mo) · 315,7 Mo de mémoire
+-- Mesuré : 82 ms · 4 M lignes lues (142,9 Mo) · 284,1 Mo de mémoire
 -- À observer : la file grossit ("scoring slower than arrival rate"), le cache de features
 -- atteint 1,9 Gio sur une limite de 2 Gio, puis un worker timeout FATAL à 14:21:07.
 
@@ -266,7 +266,7 @@ ORDER BY first_seen;
 --  Le débit de requêtes de fraud-scoring (tiré des traces) et sa mémoire (kubeletstats).
 WITH
     (SELECT argMin(ResourceAttributes['k8s.pod.name'], Timestamp) FROM payflow_otel.otel_traces
-     WHERE Timestamp BETWEEN '2026-11-27 14:15:00' AND '2026-11-27 14:25:00'
+     WHERE Timestamp BETWEEN pf_at('14:15') AND pf_at('14:25')
        AND ServiceName = 'fraud-scoring' AND StatusCode = 'Error') AS fraud_pod
 SELECT
     m.minute,
@@ -277,8 +277,8 @@ FROM
     SELECT toStartOfFiveMinutes(toDateTime(TimeUnix)) AS minute,
            round(max(Value) / 1e6) AS memory_mb
     FROM payflow_otel.otel_metrics_gauge
-    WHERE MetricName = 'k8s.pod.memory.working_set'
-      AND TimeUnix BETWEEN '2026-11-27 13:40:00' AND '2026-11-27 14:34:59'
+    WHERE MetricName = 'k8s.pod.memory.usage'
+      AND TimeUnix BETWEEN pf_at('13:40') AND pf_at('14:34:59')
       AND ResourceAttributes['k8s.pod.name'] = fraud_pod
     GROUP BY minute
 ) AS m
@@ -286,12 +286,12 @@ LEFT JOIN
 (
     SELECT toStartOfFiveMinutes(Timestamp) AS minute, count() AS requests
     FROM payflow_otel.otel_traces
-    WHERE Timestamp BETWEEN '2026-11-27 13:40:00' AND '2026-11-27 14:34:59'
+    WHERE Timestamp BETWEEN pf_at('13:40') AND pf_at('14:34:59')
       AND ServiceName = 'fraud-scoring' AND SpanKind = 'Server'
     GROUP BY minute
 ) AS t ON t.minute = m.minute
 ORDER BY m.minute;
--- Mesuré : 33 ms · 221 184 lignes lues (3,3 Mo)
+-- Mesuré : 29 ms · 204 801 lignes lues (2 Mo)
 -- À observer : les requêtes doublent à partir de 13h55 (checkout rejoue les paiements en
 -- échec, et fait scorer chaque nouvel essai), la mémoire monte d'environ 750 Mo à 2,2 Go,
 -- puis retombe à 900 Mo après 14h21 : le processus a été tué puis redémarré.
@@ -299,20 +299,20 @@ ORDER BY m.minute;
 -- ÉTAPE C5 · Les événements Kubernetes le confirment
 WITH
     (SELECT argMin(ResourceAttributes['k8s.pod.name'], Timestamp) FROM payflow_otel.otel_traces
-     WHERE Timestamp BETWEEN '2026-11-27 14:15:00' AND '2026-11-27 14:25:00'
+     WHERE Timestamp BETWEEN pf_at('14:15') AND pf_at('14:25')
        AND ServiceName = 'fraud-scoring' AND StatusCode = 'Error') AS fraud_pod,
     (SELECT any(ResourceAttributes['k8s.node.name']) FROM payflow_otel.otel_metrics_gauge
-     WHERE TimeUnix BETWEEN '2026-11-27 14:20:00' AND '2026-11-27 14:20:59'
+     WHERE TimeUnix BETWEEN pf_at('14:20') AND pf_at('14:20:59')
        AND ResourceAttributes['k8s.pod.name'] = fraud_pod) AS fraud_node
 SELECT Timestamp, EventName, Body
 FROM payflow_otel.otel_logs
 WHERE ServiceName = 'k8s-events'
-  AND Timestamp BETWEEN '2026-11-27 14:10:00' AND '2026-11-27 14:30:00'
+  AND Timestamp BETWEEN pf_at('14:10') AND pf_at('14:30')
   AND EventName != 'Unhealthy'
   AND (LogAttributes['k8s.object.name'] IN (fraud_pod, fraud_node) OR Body LIKE concat('%', fraud_node, '%')
        OR Body LIKE '%fraud-scoring%')
 ORDER BY Timestamp;
--- Mesuré : 43 ms · 2,8 M lignes lues (10,2 Mo) · 152,4 Mo de mémoire
+-- Mesuré : 60 ms · 3 M lignes lues (9,2 Mo) · 179,6 Mo de mémoire
 -- À observer : la pression mémoire sur le nœud à 14h19, l'OOM kill à 14:21:07, le
 -- back-off du redémarrage, le nœud revenu à la normale à 14h23. Pas un second bug : une
 -- conséquence du premier. Les nouveaux essais des paiements en échec ont surchargé
@@ -323,21 +323,21 @@ ORDER BY Timestamp;
 -- ÉTAPE D · Checkpoint
 SELECT
     if((SELECT count() FROM payflow_otel.otel_logs
-        WHERE Timestamp BETWEEN '2026-11-27 14:00:00' AND '2026-11-27 14:15:00'
+        WHERE Timestamp BETWEEN pf_at('14:00') AND pf_at('14:15')
           AND has(LogAttributeItems, 'merchant_id=m_16523') AND SeverityText = 'ERROR') = 1, 'OK', 'KO')     AS a_log_found,
     if((SELECT count() FROM payflow_otel.otel_logs
-        WHERE Timestamp BETWEEN '2026-11-27 13:50:00' AND '2026-11-27 14:10:00'
+        WHERE Timestamp BETWEEN pf_at('13:50') AND pf_at('14:10')
           AND ResourceAttributes['service.version'] = 'v2.4.1'
           AND hasAllTokens(lower(Body), ['maximumpoolsize'])) = 6, 'OK', 'KO')                               AS a_pool_config,
     if((SELECT min(toStartOfMinute(toDateTime(TimeUnix))) FROM payflow_otel.otel_metrics_gauge
         WHERE MetricName = 'hikaricp.connections.pending' AND Value > 20
-          AND toDate(TimeUnix) = '2026-11-27') = '2026-11-27 14:03:00', 'OK', 'KO')                          AS b_alert_fires,
+          AND toDate(TimeUnix) = pf_black_friday()) = pf_at('14:03'), 'OK', 'KO')                          AS b_alert_fires,
     if((SELECT count() FROM payflow_otel.otel_logs
         WHERE ServiceName = 'k8s-events' AND EventName = 'ScalingReplicaSet'
-          AND Timestamp BETWEEN '2026-11-27 13:50:00' AND '2026-11-27 14:03:00'
+          AND Timestamp BETWEEN pf_at('13:50') AND pf_at('14:03')
           AND Body LIKE '%CHG-4117%') = 1, 'OK', 'KO')                                                       AS b_change_found,
     if((SELECT count() FROM payflow_otel.otel_logs
         WHERE ServiceName = 'k8s-events' AND EventName = 'OOMKilling'
-          AND Timestamp BETWEEN '2026-11-27 14:10:00' AND '2026-11-27 14:30:00') >= 1, 'OK', 'KO')           AS c_oom_found
+          AND Timestamp BETWEEN pf_at('14:10') AND pf_at('14:30')) >= 1, 'OK', 'KO')           AS c_oom_found
 SETTINGS select_sequential_consistency = 1;
--- Mesuré : 76 ms · 5,6 M lignes lues (9,4 Mo) · 126,2 Mo de mémoire
+-- Mesuré : 149 ms · 6 M lignes lues (3,9 Mo) · 129,1 Mo de mémoire

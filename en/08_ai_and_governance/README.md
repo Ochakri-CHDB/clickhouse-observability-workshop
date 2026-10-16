@@ -14,28 +14,34 @@ Duration: 40 min.
 
 ---
 
-## 1. AI Notebooks (beta, Managed ClickStack only)
+## 1. AI Notebooks (beta)
 
-A notebook is an investigation written by an AI agent, tile by tile: its reasoning, every query it ran, the charts, its conclusion. You can branch from any step, add your own tiles, share it with the team.
+A notebook is an investigation written as a list of blocks: searches, charts, tables, notes. An AI agent can write the blocks for you from a question; you keep, edit or add blocks, and share the notebook with the team.
 
-1. A team admin enables AI: **Team Settings**, **Security Policies**, toggle **Generative AI**, accept.
-2. **Notebooks** (left menu), **New Shared Notebook**.
-3. Ask: *"Why did POST /v1/payments fail between 13:58 and 14:45 on 2026-11-27 (UTC)? Which version, which pods, and what was the root cause?"*
-4. Read the tiles: the agent searches the logs, opens traces, compares versions. On a thought it did not follow, **Restart from Here** with a new prompt to branch the investigation.
-5. Compare its conclusion with yours (module 6). Then try on the live stream, after breaking production again (module 5): *"What is wrong with payments in the last 10 minutes?"*
+1. Check that AI is on: **Team Settings**, tab **API & Agents**, section **Configure Generative AI**. It says *Generative AI features are enabled for this service* and lists **Chart AI Assistant** (the AI Assistant of Chart Explorer, module 4) and **AI Notebooks**. If not, a team admin turns them on there.
+2. Your Black Friday date: `SELECT pf_black_friday()` in the SQL console.
+3. Left menu, **AI notebooks**, **New Shared Notebook** (the team sees it) or **New Private Notebook** (only you).
+4. In the box **Ask AI to explore your data**, type, with your date: *Why did POST /v1/payments fail between 13:58 and 14:45 UTC on YYYY-MM-DD? Which version, which pods, and what was the root cause? Use the PayFlow sources.*
+5. Read the blocks as they arrive: the agent searches the logs, opens traces, compares versions. Each block can be opened and edited like a normal search or chart.
+6. Compare its conclusion with yours (module 6). Then try on the live stream, after breaking production again (module 5): *What is wrong with payments in the last 10 minutes?*
+
+The feature is in beta: the AI may only title the notebook and add no block. Then build the investigation yourself with **Manual Block**: **Search**, **Chart**, **Table**, **Markdown**. A notebook written by hand is still the best postmortem draft: every block is a live query, not a screenshot.
 
 ---
 
 ## 2. The ClickStack MCP server
 
-ClickStack exposes an MCP server: any MCP client (Claude Code, Cursor, VS Code...) can search logs and traces, read dashboards and alerts, with your rights.
+ClickStack exposes an MCP server: any MCP client (Claude Code, Cursor, VS Code, Codex CLI...) can search logs and traces, read dashboards and alerts, with your rights.
 
-1. In the Cloud console: **Connect**, **Connect with MCP**, enable it on the service.
-2. Endpoint `https://mcp.clickhouse.cloud/clickstack`, OAuth sign-in on first use (no API key). For example with Claude Code:
+1. **Team Settings**, tab **API & Agents**, section **Connect your AI agents**. **Remote MCP server** must say **ENABLED**.
+2. Choose your tool in the tabs (**Claude Code**, **Cursor**, **VS Code**, **Codex CLI**, **OpenCode**, **Other**) and copy the command shown. For Claude Code it has the id of your service in a header:
    ```bash
-   claude mcp add --transport http clickstack https://mcp.clickhouse.cloud/clickstack
+   claude mcp add clickstack --transport http https://mcp.clickhouse.cloud/clickstack --header "x-service-id: <your service id>"
    ```
-3. Ask your assistant: *"Using ClickStack, find the event patterns of the payment errors on 2026-11-27 between 14:00 and 14:45 and open the slowest trace."*
+   The **Service ID** is at the top of the same tab, with a **Copy** button. The first call opens a sign-in in the browser (OAuth, no API key). **Manage sessions** lists and revokes the connected tools.
+3. Ask your assistant, with your date: *Using ClickStack, find the event patterns of the payment errors on YYYY-MM-DD between 14:00 and 14:45 UTC and open the slowest trace.*
+
+In the same tab, **Export to Terraform** (experimental) downloads the dashboards, alerts, saved searches and sources of the team as a Terraform import file: the configuration of this workshop, versioned like code.
 
 ---
 
@@ -71,7 +77,8 @@ SELECT name, comment FROM system.tables WHERE database IN ('payflow_sre', 'payfl
 3. **Instructions** (paste as is):
    ```
    You are the SRE assistant of PayFlow, a payment platform on Kubernetes. Answer in English, briefly.
-   - Data is in UTC, on Friday 2026-11-27. Use absolute time ranges on that day.
+   - Data is in UTC. The incident is on Black Friday: its date is SELECT pf_black_friday(), and
+     pf_at('14:00:00') is 14:00 that day. Use absolute time ranges built with these functions.
    - Prefer the rollups: payflow_sre.red_1m (RED per minute), payflow_sre.slo_burn,
      payflow_sre.alerts, payflow_sre.service_map_5m, payflow_sre.log_patterns_10m.
      Go to payflow_otel.otel_traces and otel_logs only for details, always with a Timestamp filter
@@ -89,7 +96,7 @@ SELECT name, comment FROM system.tables WHERE database IN ('payflow_sre', 'payfl
 ### 3.3 · Two questions
 | Ask | Expected answer |
 |---|---|
-| "What happened to payments between 13:55 and 14:50 on November 27?" | error rate of `POST /v1/payments` up to ~30%, p99 3 s, from 13:58 to 14:44; root cause HikariPool timeouts in `payment` v2.4.1 (CHG-4117, pool size 10); first page at 14:00 |
+| "What happened to payments between 13:55 and 14:50 on Black Friday?" | error rate of `POST /v1/payments` up to ~30%, p99 3 s, from 13:58 to 14:44; root cause HikariPool timeouts in `payment` v2.4.1 (CHG-4117, pool size 10); first page at 14:00 |
 | "How much money did the incident cost, and which merchants were hit the most?" | ~15,300 failed payments, ~1.58 M EUR, ~8,000 merchants; top merchants by amount |
 
 ### 3.4 · Dashboards on demand
@@ -119,8 +126,14 @@ GRANT SELECT, dictGet ON payflow_inventory.* TO payflow_agent_role;
 
 ## 4. Roles and access
 
-- **In ClickStack (RBAC, Managed)**: **Team Settings**, roles Admin, Member, ReadOnly, or custom roles with No Access / Read / Manage per resource (dashboards, saved searches, alerts, notebooks). Give the payments team Manage on its own dashboards and alerts, Read elsewhere.
-- **In ClickHouse**: `01_security_and_operations.sql` creates a role per team and a row policy per table. ClickStack queries the service with the rights of the user: the payments team only ever sees the `payments` namespace, in the SQL console, in ClickStack and through the MCP server.
+### In ClickStack
+1. **Team Settings**, tab **Members & Roles**. On top, the members of the team (**Manage in Console** to invite people, from the Cloud organization). Below, the roles: **Admin**, **Member**, **ReadOnly**, and **Default New User Role** at the bottom (the role of anyone who joins).
+2. **Add Role**: **Role Name** `Payments SRE`, a **Description**, then one line per resource with **No Access**, **Read** or **Manage**: Dashboards, Saved Searches, Sources, Webhooks, Alerts, Notebooks; **Users** (No Access, Read) and **Team** (Read, Manage).
+3. The arrow at the end of Dashboards, Saved Searches, Sources and Notebooks opens **Fine-Grained Controls**: **Add Access Rule**, a **Condition** on the **Name**, the **ID** or a **Tag** (`is` or `contains`), and the access level of the matching objects. For example, Dashboards, Tag is `payments`, **Manage**: the team edits its own dashboards and only reads the others.
+4. Close with the **x** if you only looked; **Create Role** saves it.
+
+### In ClickHouse
+`01_security_and_operations.sql` creates a role per team and a row policy per table. ClickStack queries the service with the rights of the user: the payments team only ever sees the `payments` namespace, in the SQL console, in ClickStack and through the MCP server. ClickStack roles decide what you can do in the interface; ClickHouse roles decide which rows you can read.
 
 ---
 
@@ -139,7 +152,7 @@ ORDER BY minute
 
 ### 5.2 · Test it
 ```sql
-SELECT * FROM payflow_sre.api_route_status(route = 'POST /v1/payments', start = '2026-11-27 14:00:00', finish = '2026-11-27 14:10:00')
+SELECT * FROM payflow_sre.api_route_status(route = 'POST /v1/payments', start = pf_at('14:00:00'), finish = pf_at('14:10:00'))
 ```
 
 ### 5.3 · Publish it as an endpoint
@@ -148,16 +161,16 @@ SELECT * FROM payflow_sre.api_route_status(route = 'POST /v1/payments', start = 
    SELECT * FROM payflow_sre.api_route_status(route = {route:String}, start = {start:DateTime}, finish = {finish:DateTime})
    ```
 2. **Save** as `api_route_status`, then **Share**, **API Endpoint**: choose an API key with the **Query Endpoints** access, and the **Read only** database role.
-3. Call it (replace the two values):
+3. Call it (replace the two values, and `YYYY-MM-DD` by your Black Friday date):
    ```bash
    curl --user '<Key ID>:<Key secret>' \
-     'https://queries.clickhouse.cloud/run/<endpoint id>?format=JSONEachRow&param_route=POST%20%2Fv1%2Fpayments&param_start=2026-11-27%2014%3A00%3A00&param_finish=2026-11-27%2014%3A10%3A00'
+     'https://queries.clickhouse.cloud/run/<endpoint id>?format=JSONEachRow&param_route=POST%20%2Fv1%2Fpayments&param_start=YYYY-MM-DD%2014%3A00%3A00&param_finish=YYYY-MM-DD%2014%3A10%3A00'
    ```
 
 Before you have a key, the HTTPS interface of the service accepts the same parameters (a test only: never put the `default` password in a front end):
 ```bash
 curl --user "default:$CH_PASSWORD" \
-  "https://$CH_HOST:8443/?param_route=POST%20%2Fv1%2Fpayments&param_start=2026-11-27%2014%3A00%3A00&param_finish=2026-11-27%2014%3A10%3A00&default_format=JSONEachRow" \
+  "https://$CH_HOST:8443/?param_route=POST%20%2Fv1%2Fpayments&param_start=YYYY-MM-DD%2014%3A00%3A00&param_finish=YYYY-MM-DD%2014%3A10%3A00&default_format=JSONEachRow" \
   --data-binary "SELECT * FROM payflow_sre.api_route_status(route = {route:String}, start = {start:DateTime}, finish = {finish:DateTime})"
 ```
 Expected: 11 rows, `fast_burn` true from 14:00.
@@ -166,12 +179,16 @@ Expected: 11 rows, `fast_burn` true from 14:00.
 
 ## End of the day
 
-Stop the live stream of module 2, otherwise the service never idles:
+Stop the live stream of module 2 (seven refreshable views), otherwise the service never idles: run `stop_live_stream.sql`, or:
 
 ```sql
-SYSTEM STOP VIEW payflow_sim.rmv_live_traces;
 SYSTEM STOP VIEW payflow_sim.rmv_live_logs;
+SYSTEM STOP VIEW payflow_sim.rmv_live_traces;
 SYSTEM STOP VIEW payflow_sim.rmv_live_metrics;
+SYSTEM STOP VIEW payflow_sim.rmv_live_sums;
+SYSTEM STOP VIEW payflow_sim.rmv_chaos_traces;
+SYSTEM STOP VIEW payflow_sim.rmv_chaos_logs;
+SYSTEM STOP VIEW payflow_sim.rmv_chaos_metrics;
 ```
 
-(or run `stop_live_stream.sql`). `reset.sql` removes everything the workshop created.
+`reset.sql` removes everything the workshop created in the service. The ClickStack objects (sources, dashboard, saved search, alerts, notebooks) stay: delete them from the interface if you want a clean team.

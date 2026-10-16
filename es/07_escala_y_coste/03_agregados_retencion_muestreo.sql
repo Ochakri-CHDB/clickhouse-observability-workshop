@@ -44,28 +44,30 @@ SELECT
 FROM payflow_otel.otel_traces
 GROUP BY Timestamp, ServiceName, SpanName, StatusCode;
 
---  Una vista solo ve los inserts nuevos: hacemos una vez el backfill del día de Black Friday
+--  Una vista solo ve los inserts nuevos: hacemos una vez el backfill del mes, hasta el minuto
+--  anterior a la creación de la vista (el módulo 4 explica el corte)
 INSERT INTO payflow_otel.otel_traces_1m
 SELECT toStartOfMinute(Timestamp), ServiceName, SpanName, StatusCode, count(),
        avgState(Duration), maxSimpleState(Duration), quantilesState(0.95, 0.99)(Duration)
 FROM payflow_otel.otel_traces
-WHERE toDate(Timestamp) = '2026-11-27'
+WHERE Timestamp < (SELECT toStartOfMinute(metadata_modification_time) - INTERVAL 1 MINUTE
+                   FROM system.tables WHERE database = 'payflow_otel' AND name = 'otel_traces_1m_mv')
 GROUP BY 1, 2, 3, 4;
--- Medido: 2,7 s · 21,5 M filas leídas (390 MB) · 53 926 filas escritas · 1,2 GB de memoria
+-- Medido: 9,9 s · 76,7 M filas leídas (1,4 GB) · 1,7 M filas escritas · 3,7 GB de memoria
 
 SELECT
-    (SELECT count() FROM payflow_otel.otel_traces WHERE toDate(Timestamp) = '2026-11-27') AS spans,
-    (SELECT count() FROM payflow_otel.otel_traces_1m WHERE toDate(Timestamp) = '2026-11-27') AS rollup_rows,
+    (SELECT count() FROM payflow_otel.otel_traces WHERE toDate(Timestamp) = pf_black_friday()) AS spans,
+    (SELECT count() FROM payflow_otel.otel_traces_1m WHERE toDate(Timestamp) = pf_black_friday()) AS rollup_rows,
     round(spans / rollup_rows)                                                              AS spans_per_row;
--- Medido: 8 ms · 4 filas leídas
+-- Medido: 17 ms · 32 773 filas leídas (128,1 KB)
 
 SELECT Timestamp, sum(count) AS requests, round(avgMerge(avg__Duration) / 1e6) AS avg_ms
 FROM payflow_otel.otel_traces_1m
 WHERE ServiceName = 'api-gateway' AND SpanName = 'POST /v1/payments'
-  AND Timestamp BETWEEN '2026-11-27 13:55:00' AND '2026-11-27 14:05:00'
+  AND Timestamp BETWEEN pf_at('13:55') AND pf_at('14:05')
 GROUP BY Timestamp
 ORDER BY Timestamp;
--- Medido: 5 ms · 6 740 filas leídas (250,9 KB)
+-- Medido: 29 ms · 16 385 filas leídas (609,6 KB)
 
 
 -- PASO 2 · Lo que cuesta cada señal por día
@@ -77,10 +79,10 @@ SELECT
     formatReadableSize(sum(data_compressed_bytes))                          AS on_disk,
     round(sum(data_uncompressed_bytes) / sum(data_compressed_bytes), 1)     AS ratio
 FROM system.parts
-WHERE database = 'payflow_otel' AND active AND partition = '2026-11-27'
+WHERE database = 'payflow_otel' AND active AND partition = toString(pf_black_friday())
 GROUP BY table
 ORDER BY sum(data_compressed_bytes) DESC;
--- Medido: 6 ms · 216 filas leídas (16,7 KB)
+-- Medido: 8 ms · 727 filas leídas (59,8 KB)
 -- Qué observar: logs y trazas son la mayor parte del volumen, métricas y agregados son pequeños.
 -- Un año de PayFlow a este ritmo es la cifra diaria de on_disk por 365.
 
@@ -93,8 +95,8 @@ ORDER BY sum(data_compressed_bytes) DESC;
 --      ALTER TABLE payflow_otel.otel_traces_1m MODIFY TTL Timestamp + INTERVAL 13 MONTH;   -- los agregados viven mucho
 --  Existen dos herramientas más finas: un TTL sobre una columna (borrar Body a los 7 días,
 --  conservar los atributos) y TTL ... RECOMPRESS CODEC(ZSTD(3)) para comprimir más las parts antiguas.
---  Atención: los datos del taller están fechados en noviembre de 2026. No apliques esto pasada
---  esa fecha más el TTL: ClickHouse borraría los datos. El valor por defecto de ClickStack es 3 días.
+--  Atención: no apliques esto aquí. Los datos del taller cubren el último mes: con un TTL
+--  de 15 días, ClickHouse borraría la mitad. El valor por defecto de ClickStack es 3 días.
 SELECT table, engine_full LIKE '%TTL%' AS has_ttl, extract(engine_full, 'TTL ([^S]+) SETTINGS') AS ttl
 FROM system.tables
 WHERE database = 'payflow_otel' AND name LIKE 'otel\\_%' AND engine LIKE '%MergeTree'
@@ -112,8 +114,8 @@ SELECT
     round(100 * countIf(SpanName = 'POST /v1/payments' AND StatusCode = 'Error' AND cityHash64(TraceId) % 10 = 0)
               / countIf(SpanName = 'POST /v1/payments' AND cityHash64(TraceId) % 10 = 0), 2)       AS error_pct_from_10pct
 FROM payflow_otel.otel_traces
-WHERE ServiceName = 'api-gateway' AND toDate(Timestamp) = '2026-11-27';
--- Medido: 199 ms · 4,1 M filas leídas (181,6 MB) · 195,1 MB de memoria
+WHERE ServiceName = 'api-gateway' AND toDate(Timestamp) = pf_black_friday();
+-- Medido: 198 ms · 4,1 M filas leídas (181,8 MB) · 170,1 MB de memoria
 -- Qué observar: las tasas sobreviven al muestreo, los recuentos hay que volver a multiplicarlos
 -- (ClickStack lo hace con la Sample Rate Expression de la fuente). Lo que se pierde es la traza
 -- rara que necesitabas: de los 12 timeouts de la red de tarjetas del incidente, quedan 1 o 2.
@@ -124,19 +126,19 @@ CREATE OR REPLACE TABLE payflow_otel.otel_traces_kept AS payflow_otel.otel_trace
 
 INSERT INTO payflow_otel.otel_traces_kept
 SELECT * FROM payflow_otel.otel_traces
-WHERE toDate(Timestamp) = '2026-11-27'
+WHERE toDate(Timestamp) = pf_black_friday()
   AND TraceId IN
   (
       SELECT TraceId FROM payflow_otel.otel_traces
-      WHERE toDate(Timestamp) = '2026-11-27' AND (StatusCode = 'Error' OR Duration > 1000000000)
+      WHERE toDate(Timestamp) = pf_black_friday() AND (StatusCode = 'Error' OR Duration > 1000000000)
   );
--- Medido: 3,42 s · 43,1 M filas leídas (7,7 GB) · 602 753 filas escritas · 1,6 GB de memoria
+-- Medido: 3,78 s · 43,1 M filas leídas (7,7 GB) · 602 753 filas escritas · 1,6 GB de memoria
 
 SELECT
-    (SELECT count() FROM payflow_otel.otel_traces WHERE toDate(Timestamp) = '2026-11-27')   AS all_spans,
+    (SELECT count() FROM payflow_otel.otel_traces WHERE toDate(Timestamp) = pf_black_friday())   AS all_spans,
     (SELECT count() FROM payflow_otel.otel_traces_kept)                                     AS kept_spans,
     round(100 * kept_spans / all_spans, 1)                                                   AS kept_pct;
--- Medido: 6 ms · 4 filas leídas
+-- Medido: 10 ms · 5 filas leídas
 -- Qué observar: un pequeño porcentaje de los spans, y todas las trazas del incidente están ahí.
 
 
@@ -148,17 +150,17 @@ SELECT
     formatReadableSize(sum(data_uncompressed_bytes) / 86400)                AS raw_per_second,
     round(sum(data_uncompressed_bytes) / 86400 / 1e7, 2)                    AS ingest_vcpu_needed
 FROM system.parts
-WHERE database = 'payflow_otel' AND active AND partition = '2026-11-27'
+WHERE database = 'payflow_otel' AND active AND partition = toString(pf_black_friday())
   AND table IN ('otel_logs', 'otel_traces', 'otel_metrics_gauge', 'otel_metrics_sum', 'otel_metrics_histogram');
--- Medido: 3 ms · 23 filas leídas (1,5 KB)
+-- Medido: 6 ms · 498 filas leídas (33,9 KB)
 -- Qué observar: PayFlow es una plataforma pequeña para ClickHouse: una fracción de vCPU de
 -- ingesta. Las 3 réplicas del taller están dimensionadas para el módulo de los mil millones de líneas.
 
 
 -- PASO 6 · Checkpoint
 SELECT
-    if((SELECT sum(count) FROM payflow_otel.otel_traces_1m WHERE toDate(Timestamp) = '2026-11-27')
-       = (SELECT count() FROM payflow_otel.otel_traces WHERE toDate(Timestamp) = '2026-11-27'), 'OK', 'KO') AS rollup_complete,
+    if((SELECT sum(count) FROM payflow_otel.otel_traces_1m WHERE toDate(Timestamp) = pf_black_friday())
+       = (SELECT count() FROM payflow_otel.otel_traces WHERE toDate(Timestamp) = pf_black_friday()), 'OK', 'KO') AS rollup_complete,
     if((SELECT count() FROM payflow_otel.otel_traces_kept) BETWEEN 100000 AND 2000000, 'OK', 'KO')       AS retention_sampling
 SETTINGS select_sequential_consistency = 1;
--- Medido: 42 ms · 53 930 filas leídas (632 KB)
+-- Medido: 50 ms · 65 541 filas leídas (768,1 KB)

@@ -1,10 +1,10 @@
 -- =====================================================================
 --  MÓDULO 7 · Escala y coste (1/3): de un día a mil millones de líneas de log
 -- =====================================================================
---  PayFlow funciona en 8 regiones. Dos semanas de logs de todas ellas son casi
---  mil millones de líneas. Construimos esa tabla y medimos lo que ClickHouse hace
---  con ella: almacenamiento, búsqueda de texto completo, búsqueda de trazas,
---  proyecciones, 3 réplicas.
+--  PayFlow funciona en 8 regiones. Dos semanas al ritmo de Black Friday, para todas
+--  ellas, son casi mil millones de líneas de log. Construimos esa tabla y medimos lo
+--  que ClickHouse hace con ella: almacenamiento, búsqueda de texto completo, búsqueda
+--  de trazas, proyecciones, 3 réplicas.
 --
 --  La tabla XL conserva las columnas que importan para buscar (tiempo, servicio,
 --  severidad, body, trace id, pod, nodo, cluster). El esquema OpenTelemetry completo,
@@ -42,64 +42,64 @@ SETTINGS min_bytes_for_wide_part = 0;   -- un fichero por columna incluso en par
 
 
 -- PASO 2 · 8 regiones x 14 días, una región por instrucción
---  Cada instrucción copia el día 14 veces (desplazado d días) para una región,
+--  Cada instrucción copia Black Friday 14 veces (desplazado d días) para una región,
 --  con trace ids nuevos. max_insert_threads = 16 escribe en paralelo.
 INSERT INTO payflow_otel.logs_xl
 SELECT addDays(Timestamp, -d), if(TraceId = '', '', concat(substring(TraceId, 1, 24), leftPad(lower(hex(toUInt32(0 * 16 + d))), 8, '0'))),
        SeverityText, ServiceName, Body, 'payflow-prod-eu-west', ResourceAttributes['k8s.pod.name'], ResourceAttributes['k8s.node.name']
 FROM payflow_otel.otel_logs ARRAY JOIN range(0, 14) AS d
-WHERE toDate(Timestamp) = '2026-11-27'
+WHERE toDate(Timestamp) = pf_black_friday()
 SETTINGS max_insert_threads = 16;   -- región 1/8: eu-west
--- Medido: 26,6 s · 7,8 M filas leídas (1,1 GB) · 109 M filas escritas · 10,6 GB de memoria
+-- Medido: 27,5 s · 7,8 M filas leídas (1,1 GB) · 109 M filas escritas · 10,3 GB de memoria
 INSERT INTO payflow_otel.logs_xl
 SELECT addDays(Timestamp, -d), if(TraceId = '', '', concat(substring(TraceId, 1, 24), leftPad(lower(hex(toUInt32(1 * 16 + d))), 8, '0'))),
        SeverityText, ServiceName, Body, 'payflow-prod-eu-central', ResourceAttributes['k8s.pod.name'], ResourceAttributes['k8s.node.name']
 FROM payflow_otel.otel_logs ARRAY JOIN range(0, 14) AS d
-WHERE toDate(Timestamp) = '2026-11-27'
+WHERE toDate(Timestamp) = pf_black_friday()
 SETTINGS max_insert_threads = 16;   -- región 2/8: eu-central
--- Medido: 26,7 s · 7,8 M filas leídas (1,1 GB) · 109 M filas escritas · 10,7 GB de memoria
+-- Medido: 27 s · 7,8 M filas leídas (1,1 GB) · 109 M filas escritas · 9,6 GB de memoria
 INSERT INTO payflow_otel.logs_xl
 SELECT addDays(Timestamp, -d), if(TraceId = '', '', concat(substring(TraceId, 1, 24), leftPad(lower(hex(toUInt32(2 * 16 + d))), 8, '0'))),
        SeverityText, ServiceName, Body, 'payflow-prod-us-east', ResourceAttributes['k8s.pod.name'], ResourceAttributes['k8s.node.name']
 FROM payflow_otel.otel_logs ARRAY JOIN range(0, 14) AS d
-WHERE toDate(Timestamp) = '2026-11-27'
+WHERE toDate(Timestamp) = pf_black_friday()
 SETTINGS max_insert_threads = 16;   -- región 3/8: us-east
--- Medido: 26,4 s · 7,8 M filas leídas (1,1 GB) · 109 M filas escritas · 10,3 GB de memoria
+-- Medido: 31,6 s · 7,8 M filas leídas (1,1 GB) · 109 M filas escritas · 9 GB de memoria
 INSERT INTO payflow_otel.logs_xl
 SELECT addDays(Timestamp, -d), if(TraceId = '', '', concat(substring(TraceId, 1, 24), leftPad(lower(hex(toUInt32(3 * 16 + d))), 8, '0'))),
        SeverityText, ServiceName, Body, 'payflow-prod-us-west', ResourceAttributes['k8s.pod.name'], ResourceAttributes['k8s.node.name']
 FROM payflow_otel.otel_logs ARRAY JOIN range(0, 14) AS d
-WHERE toDate(Timestamp) = '2026-11-27'
+WHERE toDate(Timestamp) = pf_black_friday()
 SETTINGS max_insert_threads = 16;   -- región 4/8: us-west
--- Medido: 26,7 s · 7,8 M filas leídas (1,1 GB) · 109 M filas escritas · 10,6 GB de memoria
+-- Medido: 28,5 s · 7,8 M filas leídas (1,1 GB) · 109 M filas escritas · 9,1 GB de memoria
 INSERT INTO payflow_otel.logs_xl
 SELECT addDays(Timestamp, -d), if(TraceId = '', '', concat(substring(TraceId, 1, 24), leftPad(lower(hex(toUInt32(4 * 16 + d))), 8, '0'))),
        SeverityText, ServiceName, Body, 'payflow-prod-ap-south', ResourceAttributes['k8s.pod.name'], ResourceAttributes['k8s.node.name']
 FROM payflow_otel.otel_logs ARRAY JOIN range(0, 14) AS d
-WHERE toDate(Timestamp) = '2026-11-27'
+WHERE toDate(Timestamp) = pf_black_friday()
 SETTINGS max_insert_threads = 16;   -- región 5/8: ap-south
--- Medido: 26,5 s · 7,8 M filas leídas (1,1 GB) · 109 M filas escritas · 10,6 GB de memoria
+-- Medido: 28,5 s · 7,8 M filas leídas (1,1 GB) · 109 M filas escritas · 9 GB de memoria
 INSERT INTO payflow_otel.logs_xl
 SELECT addDays(Timestamp, -d), if(TraceId = '', '', concat(substring(TraceId, 1, 24), leftPad(lower(hex(toUInt32(5 * 16 + d))), 8, '0'))),
        SeverityText, ServiceName, Body, 'payflow-prod-ap-northeast', ResourceAttributes['k8s.pod.name'], ResourceAttributes['k8s.node.name']
 FROM payflow_otel.otel_logs ARRAY JOIN range(0, 14) AS d
-WHERE toDate(Timestamp) = '2026-11-27'
+WHERE toDate(Timestamp) = pf_black_friday()
 SETTINGS max_insert_threads = 16;   -- región 6/8: ap-northeast
--- Medido: 27,1 s · 7,8 M filas leídas (1,1 GB) · 109 M filas escritas · 10,9 GB de memoria
+-- Medido: 31,3 s · 7,8 M filas leídas (1,1 GB) · 109 M filas escritas · 8,4 GB de memoria
 INSERT INTO payflow_otel.logs_xl
 SELECT addDays(Timestamp, -d), if(TraceId = '', '', concat(substring(TraceId, 1, 24), leftPad(lower(hex(toUInt32(6 * 16 + d))), 8, '0'))),
        SeverityText, ServiceName, Body, 'payflow-prod-sa-east', ResourceAttributes['k8s.pod.name'], ResourceAttributes['k8s.node.name']
 FROM payflow_otel.otel_logs ARRAY JOIN range(0, 14) AS d
-WHERE toDate(Timestamp) = '2026-11-27'
+WHERE toDate(Timestamp) = pf_black_friday()
 SETTINGS max_insert_threads = 16;   -- región 7/8: sa-east
--- Medido: 29,5 s · 7,8 M filas leídas (1,1 GB) · 109 M filas escritas · 10,2 GB de memoria
+-- Medido: 29,1 s · 7,8 M filas leídas (1,1 GB) · 109 M filas escritas · 9,4 GB de memoria
 INSERT INTO payflow_otel.logs_xl
 SELECT addDays(Timestamp, -d), if(TraceId = '', '', concat(substring(TraceId, 1, 24), leftPad(lower(hex(toUInt32(7 * 16 + d))), 8, '0'))),
        SeverityText, ServiceName, Body, 'payflow-prod-ca-central', ResourceAttributes['k8s.pod.name'], ResourceAttributes['k8s.node.name']
 FROM payflow_otel.otel_logs ARRAY JOIN range(0, 14) AS d
-WHERE toDate(Timestamp) = '2026-11-27'
+WHERE toDate(Timestamp) = pf_black_friday()
 SETTINGS max_insert_threads = 16;   -- región 8/8: ca-central
--- Medido: 27,4 s · 7,8 M filas leídas (1,1 GB) · 109 M filas escritas · 10,7 GB de memoria
+-- Medido: 30,2 s · 7,8 M filas leídas (1,1 GB) · 109 M filas escritas · 9,2 GB de memoria
 
 
 -- PASO 3 · Lo que cuestan en disco mil millones de líneas de log
@@ -111,7 +111,7 @@ SELECT
     round(sum(data_compressed_bytes) / sum(rows), 1)                        AS bytes_per_line
 FROM system.parts
 WHERE database = 'payflow_otel' AND table = 'logs_xl' AND active;
--- Medido: 4 ms · 319 filas leídas (18,7 KB)
+-- Medido: 4 ms · 257 filas leídas (15,1 KB)
 
 SELECT column,
        formatReadableSize(sum(column_data_compressed_bytes))   AS on_disk,
@@ -120,7 +120,7 @@ FROM system.parts_columns
 WHERE database = 'payflow_otel' AND table = 'logs_xl' AND active AND column NOT LIKE '\\_%'
 GROUP BY column
 ORDER BY sum(column_data_compressed_bytes) DESC;
--- Medido: 14 ms · 2 785 filas leídas (186,4 KB)
+-- Medido: 12 ms · 2 237 filas leídas (149,7 KB)
 -- Qué observar: Body es la mayor parte del almacenamiento. Las columnas LowCardinality
 -- (servicio, pod, nodo, cluster) no cuestan casi nada. Los timestamps se comprimen bien con Delta.
 
@@ -130,4 +130,4 @@ SELECT
     if((SELECT count() FROM payflow_otel.logs_xl) > 850000000, 'OK', 'KO') AS billion_scale,
     if((SELECT uniqExact(Cluster) FROM payflow_otel.logs_xl) = 8, 'OK', 'KO') AS regions
 SETTINGS select_sequential_consistency = 1;
--- Medido: 1,92 s · 875 M filas leídas (834,1 MB) · 246,1 MB de memoria
+-- Medido: 2,63 s · 875 M filas leídas (834,1 MB) · 262,8 MB de memoria

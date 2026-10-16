@@ -6,56 +6,88 @@
 --  ClickHouse les écrit dans otel_traces et otel_metrics_*. Aucun parsing nécessaire.
 --  La passerelle ajoute seulement du contexte (l'équipe, comme pour les logs du fichier 02).
 --  Les métriques viennent de trois endroits, tous simulés ici :
---    · le receiver kubeletstats des agents : CPU et mémoire de chaque pod, toutes les 15 s
+--    · le receiver kubeletstats des agents : CPU, mémoire et disque de chaque pod et nœud
+--    · le receiver k8s_cluster : phases des pods et des namespaces, état ready des nœuds,
+--      redémarrages
 --    · l'application elle-même : le pool de connexions HikariCP, le lag du consumer Kafka
---    · le receiver k8s_cluster : les redémarrages de conteneurs
 --  La table de recherche des trace ids (module 1, fichier 02) se remplit seule via sa vue.
 -- =====================================================================
 
 
--- ÉTAPE 1 · Les spans de la journée, en 4 lots
+-- ÉTAPE 1 · Les spans du mois : 3 lots de journées ordinaires, puis le Black Friday
 INSERT INTO payflow_otel.otel_traces
     (Timestamp, TraceId, SpanId, ParentSpanId, TraceState, SpanName, SpanKind, ServiceName, ResourceAttributes, ScopeName, ScopeVersion,
      SpanAttributes, Duration, StatusCode, StatusMessage, `Events.Timestamp`, `Events.Name`, `Events.Attributes`,
      `Links.TraceId`, `Links.SpanId`, `Links.TraceState`, `Links.Attributes`)
 SELECT * EXCEPT (pod) REPLACE (mapUpdate(ResourceAttributes, map('service.team', dictGet('payflow_inventory.dict_service', 'team', ServiceName))) AS ResourceAttributes)
-FROM payflow_sim.spans(from_s = 0, to_s = 28800);        -- de 00h00 à 08h00
--- Mesuré : 8,12 s · 3,4 M lignes lues (156,6 Mo) · 3,6 M lignes écrites · 7,3 Go de mémoire
+FROM payflow_sim.spans(from_t = pf_day(-29), to_t = pf_day(-19));
+-- Mesuré : 32 s · 16,5 M lignes lues (720,5 Mo) · 16,6 M lignes écrites · 10,5 Go de mémoire
 INSERT INTO payflow_otel.otel_traces
     (Timestamp, TraceId, SpanId, ParentSpanId, TraceState, SpanName, SpanKind, ServiceName, ResourceAttributes, ScopeName, ScopeVersion,
      SpanAttributes, Duration, StatusCode, StatusMessage, `Events.Timestamp`, `Events.Name`, `Events.Attributes`,
      `Links.TraceId`, `Links.SpanId`, `Links.TraceState`, `Links.Attributes`)
 SELECT * EXCEPT (pod) REPLACE (mapUpdate(ResourceAttributes, map('service.team', dictGet('payflow_inventory.dict_service', 'team', ServiceName))) AS ResourceAttributes)
-FROM payflow_sim.spans(from_s = 28800, to_s = 50400);    -- de 08h00 à 14h00
--- Mesuré : 7,95 s · 3,5 M lignes lues (161,5 Mo) · 3,8 M lignes écrites · 7,4 Go de mémoire
+FROM payflow_sim.spans(from_t = pf_day(-19), to_t = pf_day(-9));
+-- Mesuré : 30,5 s · 16,4 M lignes lues (719,7 Mo) · 16,6 M lignes écrites · 10,2 Go de mémoire
 INSERT INTO payflow_otel.otel_traces
     (Timestamp, TraceId, SpanId, ParentSpanId, TraceState, SpanName, SpanKind, ServiceName, ResourceAttributes, ScopeName, ScopeVersion,
      SpanAttributes, Duration, StatusCode, StatusMessage, `Events.Timestamp`, `Events.Name`, `Events.Attributes`,
      `Links.TraceId`, `Links.SpanId`, `Links.TraceState`, `Links.Attributes`)
 SELECT * EXCEPT (pod) REPLACE (mapUpdate(ResourceAttributes, map('service.team', dictGet('payflow_inventory.dict_service', 'team', ServiceName))) AS ResourceAttributes)
-FROM payflow_sim.spans(from_s = 50400, to_s = 68400);    -- de 14h00 à 19h00
--- Mesuré : 12,7 s · 7,2 M lignes lues (327,9 Mo) · 7,6 M lignes écrites · 10 Go de mémoire
+FROM payflow_sim.spans(from_t = pf_day(-9), to_t = pf_day(0));
+-- Mesuré : 29,4 s · 15,1 M lignes lues (661,6 Mo) · 15,2 M lignes écrites · 10,5 Go de mémoire
+--  Black Friday
 INSERT INTO payflow_otel.otel_traces
     (Timestamp, TraceId, SpanId, ParentSpanId, TraceState, SpanName, SpanKind, ServiceName, ResourceAttributes, ScopeName, ScopeVersion,
      SpanAttributes, Duration, StatusCode, StatusMessage, `Events.Timestamp`, `Events.Name`, `Events.Attributes`,
      `Links.TraceId`, `Links.SpanId`, `Links.TraceState`, `Links.Attributes`)
 SELECT * EXCEPT (pod) REPLACE (mapUpdate(ResourceAttributes, map('service.team', dictGet('payflow_inventory.dict_service', 'team', ServiceName))) AS ResourceAttributes)
-FROM payflow_sim.spans(from_s = 68400, to_s = 86400);    -- de 19h00 à 24h00
--- Mesuré : 14,2 s · 7,4 M lignes lues (339,6 Mo) · 7,9 M lignes écrites · 9,8 Go de mémoire
+FROM payflow_sim.spans(from_t = pf_at('00:00'), to_t = pf_at('12:00'));
+-- Mesuré : 10,7 s · 5,5 M lignes lues (248,8 Mo) · 5,8 M lignes écrites · 9,2 Go de mémoire
+INSERT INTO payflow_otel.otel_traces
+    (Timestamp, TraceId, SpanId, ParentSpanId, TraceState, SpanName, SpanKind, ServiceName, ResourceAttributes, ScopeName, ScopeVersion,
+     SpanAttributes, Duration, StatusCode, StatusMessage, `Events.Timestamp`, `Events.Name`, `Events.Attributes`,
+     `Links.TraceId`, `Links.SpanId`, `Links.TraceState`, `Links.Attributes`)
+SELECT * EXCEPT (pod) REPLACE (mapUpdate(ResourceAttributes, map('service.team', dictGet('payflow_inventory.dict_service', 'team', ServiceName))) AS ResourceAttributes)
+FROM payflow_sim.spans(from_t = pf_at('12:00'), to_t = pf_at('18:00'));
+-- Mesuré : 13 s · 7,1 M lignes lues (321,8 Mo) · 7,5 M lignes écrites · 9,5 Go de mémoire
+INSERT INTO payflow_otel.otel_traces
+    (Timestamp, TraceId, SpanId, ParentSpanId, TraceState, SpanName, SpanKind, ServiceName, ResourceAttributes, ScopeName, ScopeVersion,
+     SpanAttributes, Duration, StatusCode, StatusMessage, `Events.Timestamp`, `Events.Name`, `Events.Attributes`,
+     `Links.TraceId`, `Links.SpanId`, `Links.TraceState`, `Links.Attributes`)
+SELECT * EXCEPT (pod) REPLACE (mapUpdate(ResourceAttributes, map('service.team', dictGet('payflow_inventory.dict_service', 'team', ServiceName))) AS ResourceAttributes)
+FROM payflow_sim.spans(from_t = pf_at('18:00'), to_t = pf_day(1));
+-- Mesuré : 16,3 s · 9,1 M lignes lues (415,1 Mo) · 9,6 M lignes écrites · 10 Go de mémoire
 
-SELECT count() AS spans, uniqExact(TraceId) AS traces, round(count() / uniqExact(TraceId), 1) AS spans_per_trace
-FROM payflow_otel.otel_traces;
--- Mesuré : 308 ms · 21,5 M lignes lues (719,1 Mo) · 720,6 Mo de mémoire
+SELECT if(toDate(Timestamp) = pf_black_friday(), 'Black Friday', 'ordinary days') AS days,
+       uniqExact(toDate(Timestamp)) AS day_count,
+       count() AS spans, uniqExact(TraceId) AS traces, round(count() / uniqExact(TraceId), 1) AS spans_per_trace
+FROM payflow_otel.otel_traces
+GROUP BY days;
+-- Mesuré : 1,19 s · 67 M lignes lues (2,7 Go) · 844 Mo de mémoire
 
 
--- ÉTAPE 2 · CPU et mémoire des pods, toutes les 15 secondes (kubeletstats)
---  La charge suit le trafic. Deux histoires se cachent dans ces chiffres :
---    · les pods payment v2.4.1 consomment MOINS de CPU : leurs threads attendent une connexion
---    · le pod fraud-scoring sur ip-10-0-3-17 grossit à partir de 14h05 (retries) jusqu'à sa
---      limite de 2 GiB, est tué à 14:21:07, redémarre à 14:21:52
-INSERT INTO payflow_otel.otel_metrics_gauge
-    (ResourceAttributes, ServiceName, MetricName, MetricDescription, MetricUnit, Attributes, StartTimeUnix, TimeUnix, Value)
-WITH toDateTime64('2026-11-27 00:00:00', 9, 'UTC') AS day0
+-- ÉTAPE 2 · Les générateurs de métriques, en vues paramétrées
+--  Ils reprennent les noms des receivers OpenTelemetry, ce que cherchent le dashboard
+--  Kubernetes et l'onglet Infrastructure de ClickStack :
+--    · kubeletstats : k8s.pod.cpu.utilization, k8s.pod.memory.usage, leurs
+--      *_limit_utilization, k8s.pod.filesystem.available, et la même chose par nœud
+--    · k8s_cluster : k8s.pod.phase, k8s.container.restarts, k8s.node.condition_ready,
+--      k8s.namespace.phase
+--  Toutes les 30 s, le pas par défaut des graphiques Infrastructure de ClickStack.
+--    · l'application : le pool de connexions HikariCP, le lag du consumer Kafka
+--  La charge suit le trafic de chaque instant (pf_rate_at). Des histoires se cachent
+--  dans ces chiffres :
+--    · les pods payment en v2.4.1 consomment MOINS de CPU : leurs threads attendent
+--      une connexion
+--    · le pod fraud-scoring sur ip-10-0-3-17 grossit à partir de 14h05 (les retries)
+--      jusqu'à sa limite de 2 GiB, est tué à 14:21:07, redémarre à 14:21:52 ; son petit
+--      nœud manque de mémoire au même moment
+--  ts est un point toutes les 30 s, s sa seconde de la journée, bf indique s'il s'agit
+--  du Black Friday.
+
+--  Chaque pod en marche, toutes les 30 s : CPU, mémoire, disque, phase, redémarrages
+CREATE OR REPLACE VIEW payflow_sim.pod_metrics AS
 SELECT
     map('service.name', p.deployment, 'service.version', p.version, 'k8s.cluster.name', 'payflow-prod-eu',
         'k8s.namespace.name', p.namespace, 'k8s.deployment.name', p.deployment, 'k8s.pod.name', p.pod_name,
@@ -65,106 +97,200 @@ SELECT
     m.2                                                                                                   AS MetricDescription,
     m.3                                                                                                   AS MetricUnit,
     map()                                                                                                 AS Attributes,
-    addSeconds(day0, s)                                                                                   AS StartTimeUnix,
-    addSeconds(day0, s)                                                                                   AS TimeUnix,
+    toDateTime64(t, 9, 'UTC')                                                                             AS StartTimeUnix,
+    toDateTime64(t, 9, 'UTC')                                                                             AS TimeUnix,
     m.4                                                                                                   AS Value
 FROM payflow_inventory.pod AS p
-ARRAY JOIN range(0, 86400, 15) AS s
+ARRAY JOIN range(intDiv(toUnixTimestamp({from_t:DateTime}) + 29, 30) * 30, toUnixTimestamp({to_t:DateTime}), 30) AS ts
+ARRAY JOIN [toDateTime(ts, 'UTC')] AS t
+ARRAY JOIN [toUInt32(ts % 86400)] AS s
+ARRAY JOIN [toDate(t) = pf_black_friday()] AS bf
+ARRAY JOIN [multiIf(p.deployment = 'fraud-scoring', 2048, p.deployment IN ('payment', 'card-network-adapter', 'ledger'), 2560, 512)] AS limit_mib
+ARRAY JOIN [least(0.98, (0.08 + 0.5 * pf_rate_at(t) / 40 * if(p.version = 'v2.4.1', 0.45, 1)
+                   * if(p.deployment = 'fraud-scoring' AND bf AND s >= 50700 AND s < 53100, 2.2, 1)) * (0.9 + 0.2 * pf_r(cityHash64(p.pod_name), ts)))] AS cpu
+ARRAY JOIN [multiIf(p.deployment = 'fraud-scoring' AND p.slot = 2 AND bf AND s >= 50700 AND s < 51667,
+                        (900 + (s - 50700) / 967 * 1240) * 1048576,                        -- de 900 MiB à 2,1 GiB en 16 minutes
+                    p.deployment = 'fraud-scoring' AND p.slot = 2 AND bf AND s >= 51667 AND s < 51712, 0,   -- tué, en redémarrage
+                    p.deployment = 'fraud-scoring' AND p.slot = 2 AND bf AND s >= 51712,
+                        (700 + 200 * least(1, (s - 51712) / 600.0)) * 1048576 * (0.97 + 0.06 * pf_r(cityHash64(p.pod_name), ts)),
+                    p.deployment = 'fraud-scoring', 900 * 1048576 * (0.97 + 0.06 * pf_r(cityHash64(p.pod_name), ts)),
+                    p.deployment IN ('payment', 'card-network-adapter', 'ledger'),
+                        (1400 + 300 * pf_rate_at(t) / 40) * 1048576 * (0.97 + 0.06 * pf_r(cityHash64(p.pod_name), ts)),
+                    (180 + 60 * pf_rate_at(t) / 40) * 1048576 * (0.95 + 0.1 * pf_r(cityHash64(p.pod_name), ts)))] AS mem
 ARRAY JOIN [
-    ('k8s.pod.cpu.utilization', 'CPU used, as a share of the pod limit', '1',
-     least(0.98, (0.08 + 0.5 * pf_rate(s) / 40 * if(p.version = 'v2.4.1', 0.45, 1)
-                  * if(p.deployment = 'fraud-scoring' AND s >= 50700 AND s < 53100, 2.2, 1)) * (0.9 + 0.2 * pf_r(cityHash64(p.pod_name), s)))),
-    ('k8s.pod.memory.working_set', 'Memory working set of the pod', 'By',
-     multiIf(p.deployment = 'fraud-scoring' AND p.slot = 2 AND s >= 50700 AND s < 51667,
-                 (900 + (s - 50700) / 967 * 1240) * 1048576,                        -- de 900 MiB à 2,1 GiB en 16 minutes
-             p.deployment = 'fraud-scoring' AND p.slot = 2 AND s >= 51667 AND s < 51712, 0,   -- tué, en redémarrage
-             p.deployment = 'fraud-scoring', (700 + 200 * least(1, greatest(0, (s - 51712) / 600.0) + if(p.slot = 2, 0, 1))) * 1048576 * (0.97 + 0.06 * pf_r(cityHash64(p.pod_name), s)),
-             p.deployment IN ('payment', 'card-network-adapter', 'ledger'), (1400 + 300 * pf_rate(s) / 40) * 1048576 * (0.97 + 0.06 * pf_r(cityHash64(p.pod_name), s)),
-             (180 + 60 * pf_rate(s) / 40) * 1048576 * (0.95 + 0.1 * pf_r(cityHash64(p.pod_name), s))))] AS m
-WHERE addSeconds(day0, s) >= p.started_at AND addSeconds(day0, s) <= p.stopped_at;
--- Mesuré : 1,34 s · 49 lignes lues (3,4 Ko) · 426 240 lignes écrites · 644,5 Mo de mémoire
+    ('k8s.pod.cpu.utilization',          'CPU used, in cores', '1', cpu),
+    ('k8s.pod.cpu_limit_utilization',    'CPU used, as a share of the pod limit (1 core)', '1', cpu),
+    ('k8s.pod.memory.usage',             'Memory used by the pod', 'By', mem),
+    ('k8s.pod.memory_limit_utilization', 'Memory used, as a share of the pod limit', '1', mem / (limit_mib * 1048576)),
+    ('k8s.pod.phase',                    'Pod phase: 1 Pending, 2 Running, 3 Succeeded, 4 Failed', '1', 2),
+    ('k8s.pod.filesystem.available',     'Free space on the pod volume', 'By', (8192 - 300 * pf_r(p.pod_name, toDate(t))) * 1048576),
+    ('k8s.container.restarts',           'Restarts of the container since the pod started', '{restart}',
+        toFloat64(p.deployment = 'fraud-scoring' AND p.slot = 2 AND pf_at('14:21:52') BETWEEN p.started_at AND p.stopped_at
+                  AND t >= pf_at('14:21:52')))] AS m
+WHERE t >= p.started_at AND t <= p.stopped_at;
 
+--  Chaque nœud, à partir des pods qu'il fait tourner : CPU (cœurs utilisés / cœurs),
+--  mémoire (système + pods). Le plus petit nœud, ip-10-0-3-17, est encombré : 10,3 GiB
+--  de ses 16 GiB sont pris par le système et les agents du nœud, c'est pourquoi il
+--  manque de mémoire le premier.
+CREATE OR REPLACE VIEW payflow_sim.node_metrics AS
+SELECT
+    map('k8s.cluster.name', 'payflow-prod-eu', 'k8s.node.name', node, 'cloud.availability_zone', pf_zone(node)) AS ResourceAttributes,
+    ''                                                                                                    AS ServiceName,
+    m.1                                                                                                   AS MetricName,
+    m.2                                                                                                   AS MetricDescription,
+    m.3                                                                                                   AS MetricUnit,
+    map()                                                                                                 AS Attributes,
+    TimeUnix                                                                                              AS StartTimeUnix,
+    TimeUnix,
+    m.4                                                                                                   AS Value
+FROM
+(
+    SELECT ResourceAttributes['k8s.node.name'] AS node, TimeUnix,
+           sumIf(Value, MetricName = 'k8s.pod.cpu.utilization')  AS pods_cpu,
+           sumIf(Value, MetricName = 'k8s.pod.memory.usage')     AS pods_mem
+    FROM payflow_sim.pod_metrics(from_t = {from_t:DateTime}, to_t = {to_t:DateTime})
+    WHERE MetricName IN ('k8s.pod.cpu.utilization', 'k8s.pod.memory.usage')
+    GROUP BY node, TimeUnix
+)
+ARRAY JOIN [dictGet('payflow_inventory.dict_node', 'memory_gib', node)] AS mem_gib
+ARRAY JOIN [toUInt8(if(node = 'ip-10-0-3-17', 4, 8))] AS cores
+ARRAY JOIN [
+    ('k8s.node.cpu.utilization',      'CPU used, as a share of the node', '1', least(0.97, (0.3 + pods_cpu) / cores)),
+    ('k8s.node.memory.usage',         'Memory used on the node', 'By',
+        (if(node = 'ip-10-0-3-17', 10.3, mem_gib * 0.25) * 1073741824 + pods_mem)),
+    ('k8s.node.filesystem.available', 'Free space on the node disk', 'By', (61440 - 2000 * pf_r(node, toDate(TimeUnix))) * 1048576),
+    ('k8s.node.condition_ready',      'Node is Ready (1) or not (0)', '1', 1)] AS m;
 
--- ÉTAPE 3 · Le pool de connexions HikariCP de chaque pod payment (la preuve décisive)
+--  Le pool de connexions HikariCP de chaque pod payment (la preuve décisive)
 --  max est la taille configurée : 50 en v2.4.0, 10 en v2.4.1. Quand le pool est
 --  plein, les requêtes font la queue (pending) et abandonnent après 3 s.
-INSERT INTO payflow_otel.otel_metrics_gauge
-    (ResourceAttributes, ServiceName, MetricName, MetricDescription, MetricUnit, Attributes, StartTimeUnix, TimeUnix, Value)
-WITH toDateTime64('2026-11-27 00:00:00', 9, 'UTC') AS day0
+CREATE OR REPLACE VIEW payflow_sim.pool_metrics AS
 SELECT
     map('service.name', 'payment', 'service.version', p.version, 'k8s.cluster.name', 'payflow-prod-eu',
         'k8s.namespace.name', p.namespace, 'k8s.deployment.name', 'payment', 'k8s.pod.name', p.pod_name,
-        'k8s.pod.uid', p.pod_uid, 'k8s.node.name', p.node_name),
-    'payment', m.1, m.2, '{connection}', map('pool', 'HikariPool-1'),
-    addSeconds(day0, s), addSeconds(day0, s), m.3
+        'k8s.pod.uid', p.pod_uid, 'k8s.node.name', p.node_name)                                          AS ResourceAttributes,
+    'payment'                                                                                             AS ServiceName,
+    m.1                                                                                                   AS MetricName,
+    m.2                                                                                                   AS MetricDescription,
+    '{connection}'                                                                                        AS MetricUnit,
+    map('pool', 'HikariPool-1')                                                                           AS Attributes,
+    toDateTime64(t, 9, 'UTC')                                                                             AS StartTimeUnix,
+    toDateTime64(t, 9, 'UTC')                                                                             AS TimeUnix,
+    m.3                                                                                                   AS Value
 FROM payflow_inventory.pod AS p
-ARRAY JOIN range(0, 86400, 15) AS s
+ARRAY JOIN range(intDiv(toUnixTimestamp({from_t:DateTime}) + 29, 30) * 30, toUnixTimestamp({to_t:DateTime}), 30) AS ts
+ARRAY JOIN [toDateTime(ts, 'UTC')] AS t
 ARRAY JOIN [
     ('hikaricp.connections.max',     'Configured pool size', toFloat64(if(p.version = 'v2.4.1', 10, 50))),
     ('hikaricp.connections.active',  'Connections in use',
-        if(p.version = 'v2.4.1' AND s >= 50580, 10, round(1 + pf_rate(s) / 8 + 2 * pf_r(cityHash64(p.pod_name), s)))),
+        if(p.version = 'v2.4.1' AND t >= pf_at('14:03'), 10, round(1 + pf_rate_at(t) / 8 + 2 * pf_r(cityHash64(p.pod_name), ts)))),
     ('hikaricp.connections.pending', 'Threads waiting for a connection',
-        if(p.version = 'v2.4.1' AND s >= 50580, round(pf_rate(s) * 1.4 * (0.8 + 0.4 * pf_r(cityHash64(p.pod_name, 'p'), s))), 0))] AS m
-WHERE p.deployment = 'payment'
-  AND addSeconds(day0, s) >= p.started_at AND addSeconds(day0, s) <= p.stopped_at;
--- Mesuré : 424 ms · 49 lignes lues (3,4 Ko) · 103 680 lignes écrites · 172,2 Mo de mémoire
+        if(p.version = 'v2.4.1' AND t >= pf_at('14:03'), round(pf_rate_at(t) * 1.4 * (0.8 + 0.4 * pf_r(cityHash64(p.pod_name, 'p'), ts))), 0))] AS m
+WHERE p.deployment = 'payment' AND t >= p.started_at AND t <= p.stopped_at;
+
+--  Tout ce qui va dans otel_metrics_gauge, en une seule vue : pods, nœuds, pools,
+--  namespaces (k8s_cluster) et le lag du consumer Kafka de notification
+CREATE OR REPLACE VIEW payflow_sim.gauge_metrics AS
+SELECT * FROM payflow_sim.pod_metrics(from_t = {from_t:DateTime}, to_t = {to_t:DateTime})
+UNION ALL
+SELECT * FROM payflow_sim.node_metrics(from_t = {from_t:DateTime}, to_t = {to_t:DateTime})
+UNION ALL
+SELECT * FROM payflow_sim.pool_metrics(from_t = {from_t:DateTime}, to_t = {to_t:DateTime})
+UNION ALL
+SELECT map('k8s.cluster.name', 'payflow-prod-eu', 'k8s.namespace.name', ns), '', 'k8s.namespace.phase',
+       'Namespace phase: 1 Active, 0 Terminating', '1', map(), toDateTime64(t, 9, 'UTC'), toDateTime64(t, 9, 'UTC'), 1
+FROM numbers(intDiv(toUnixTimestamp({from_t:DateTime}) + 29, 30), greatest(0, intDiv(toUnixTimestamp({to_t:DateTime}) + 29, 30) - intDiv(toUnixTimestamp({from_t:DateTime}) + 29, 30)))
+ARRAY JOIN [toDateTime(number * 30, 'UTC')] AS t
+ARRAY JOIN ['edge', 'payments', 'risk'] AS ns
+UNION ALL
+SELECT map('service.name', 'notification', 'k8s.cluster.name', 'payflow-prod-eu'), 'notification',
+       'kafka.consumer.lag', 'Messages not yet processed by the consumer group', '{message}',
+       map('messaging.destination.name', 'payment.events', 'messaging.consumer.group.name', 'notification'),
+       toDateTime64(t, 9, 'UTC'), toDateTime64(t, 9, 'UTC'),
+       round(pf_rate_at(t) * 4 * (0.5 + pf_r(toInt64(number) - intDiv(toInt64(toUnixTimestamp(pf_day(0))), 30), 'lag')))
+FROM numbers(intDiv(toUnixTimestamp({from_t:DateTime}) + 29, 30), greatest(0, intDiv(toUnixTimestamp({to_t:DateTime}) + 29, 30) - intDiv(toUnixTimestamp({from_t:DateTime}) + 29, 30)))
+ARRAY JOIN [toDateTime(number * 30, 'UTC')] AS t;
+
+--  Compteurs cumulatifs pour otel_metrics_sum : depuis combien de temps chaque pod et
+--  chaque nœud tourne
+CREATE OR REPLACE VIEW payflow_sim.sum_metrics AS
+SELECT
+    map('service.name', p.deployment, 'k8s.cluster.name', 'payflow-prod-eu', 'k8s.namespace.name', p.namespace,
+        'k8s.deployment.name', p.deployment, 'k8s.pod.name', p.pod_name, 'k8s.pod.uid', p.pod_uid,
+        'k8s.node.name', p.node_name)                                                                     AS ResourceAttributes,
+    p.deployment                                                                                          AS ServiceName,
+    'k8s.pod.uptime'                                                                                      AS MetricName,
+    'Time since the pod started'                                                                          AS MetricDescription,
+    's'                                                                                                   AS MetricUnit,
+    map()                                                                                                 AS Attributes,
+    toDateTime64(p.started_at, 9, 'UTC')                                                                  AS StartTimeUnix,
+    toDateTime64(t, 9, 'UTC')                                                                             AS TimeUnix,
+    toFloat64(dateDiff('second', p.started_at, t))                                                        AS Value,
+    2                                                                                                     AS AggregationTemporality,   -- cumulatif
+    true                                                                                                  AS IsMonotonic
+FROM payflow_inventory.pod AS p
+ARRAY JOIN range(intDiv(toUnixTimestamp({from_t:DateTime}) + 59, 60) * 60, toUnixTimestamp({to_t:DateTime}), 60) AS ts
+ARRAY JOIN [toDateTime(ts, 'UTC')] AS t
+WHERE t >= p.started_at AND t <= p.stopped_at
+UNION ALL
+SELECT map('k8s.cluster.name', 'payflow-prod-eu', 'k8s.node.name', n.node_name), '', 'k8s.node.uptime',
+       'Time since the node started', 's', map(), toDateTime64(pf_day(-45), 9, 'UTC'), toDateTime64(t, 9, 'UTC'),
+       toFloat64(dateDiff('second', pf_day(-45), t)), 2, true
+FROM payflow_inventory.node AS n
+ARRAY JOIN range(intDiv(toUnixTimestamp({from_t:DateTime}) + 59, 60) * 60, toUnixTimestamp({to_t:DateTime}), 60) AS ts
+ARRAY JOIN [toDateTime(ts, 'UTC')] AS t;
 
 
--- ÉTAPE 4 · Lag du consumer Kafka et redémarrages de conteneurs
+-- ÉTAPE 3 · Envoyer les métriques du mois
 INSERT INTO payflow_otel.otel_metrics_gauge
     (ResourceAttributes, ServiceName, MetricName, MetricDescription, MetricUnit, Attributes, StartTimeUnix, TimeUnix, Value)
-WITH toDateTime64('2026-11-27 00:00:00', 9, 'UTC') AS day0
-SELECT
-    map('service.name', 'notification', 'k8s.cluster.name', 'payflow-prod-eu'), 'notification',
-    'kafka.consumer.lag', 'Messages not yet processed by the consumer group', '{message}',
-    map('messaging.destination.name', 'payment.events', 'messaging.consumer.group.name', 'notification'),
-    addSeconds(day0, s), addSeconds(day0, s),
-    round(pf_rate(s) * 4 * (0.5 + pf_r(s, 'lag')))
-FROM numbers(5760) ARRAY JOIN [toUInt32(number * 15)] AS s;
--- Mesuré : 75 ms · 5 760 lignes lues (45 Ko) · 5 760 lignes écrites
+SELECT * FROM payflow_sim.gauge_metrics(from_t = pf_day(-29), to_t = pf_day(-19));
+-- Mesuré : 15,2 s · 57 823 lignes lues (464,8 Ko) · 9,5 M lignes écrites · 9,5 Go de mémoire
+INSERT INTO payflow_otel.otel_metrics_gauge
+    (ResourceAttributes, ServiceName, MetricName, MetricDescription, MetricUnit, Attributes, StartTimeUnix, TimeUnix, Value)
+SELECT * FROM payflow_sim.gauge_metrics(from_t = pf_day(-19), to_t = pf_day(-9));
+-- Mesuré : 14,8 s · 57 823 lignes lues (464,8 Ko) · 9,5 M lignes écrites · 9,7 Go de mémoire
+INSERT INTO payflow_otel.otel_metrics_gauge
+    (ResourceAttributes, ServiceName, MetricName, MetricDescription, MetricUnit, Attributes, StartTimeUnix, TimeUnix, Value)
+SELECT * FROM payflow_sim.gauge_metrics(from_t = pf_day(-9), to_t = pf_day(1));
+-- Mesuré : 14,9 s · 57 823 lignes lues (464,8 Ko) · 9,5 M lignes écrites · 9,4 Go de mémoire
 
 INSERT INTO payflow_otel.otel_metrics_sum
     (ResourceAttributes, ServiceName, MetricName, MetricDescription, MetricUnit, Attributes, StartTimeUnix, TimeUnix, Value,
      AggregationTemporality, IsMonotonic)
-WITH toDateTime64('2026-11-27 00:00:00', 9, 'UTC') AS day0
-SELECT
-    map('service.name', p.deployment, 'k8s.cluster.name', 'payflow-prod-eu', 'k8s.namespace.name', p.namespace,
-        'k8s.pod.name', p.pod_name, 'k8s.node.name', p.node_name),
-    p.deployment, 'k8s.container.restarts', 'Restarts of the container since the pod started', '{restart}', map(),
-    toDateTime64(p.started_at, 9, 'UTC'), addSeconds(day0, s),
-    if(p.deployment = 'fraud-scoring' AND p.slot = 2 AND s >= 51712, 1, 0),
-    2, true   -- cumulatif et monotone : un compteur qui ne fait que monter
-FROM payflow_inventory.pod AS p
-ARRAY JOIN range(0, 86400, 60) AS s
-WHERE addSeconds(day0, s) >= p.started_at AND addSeconds(day0, s) <= p.stopped_at;
--- Mesuré : 192 ms · 49 lignes lues (2,4 Ko) · 53 280 lignes écrites · 65,2 Mo de mémoire
+SELECT * FROM payflow_sim.sum_metrics(from_t = pf_day(-29), to_t = pf_day(1));
+-- Mesuré : 6,53 s · 87 lignes lues (4,8 Ko) · 2,1 M lignes écrites · 2,4 Go de mémoire
 
 SELECT MetricName, count() AS points, round(min(Value), 2) AS min_value, round(max(Value), 2) AS max_value
 FROM payflow_otel.otel_metrics_gauge
 GROUP BY MetricName
 ORDER BY MetricName;
--- Mesuré : 15 ms · 535 680 lignes lues (18,3 Mo) · 60,3 Mo de mémoire
+-- Mesuré : 228 ms · 28,4 M lignes lues (949,5 Mo) · 300,6 Mo de mémoire
 
 
--- ÉTAPE 5 · Les trois signaux, côte à côte, sur une minute de l'incident
+-- ÉTAPE 4 · Les trois signaux, côte à côte, sur une minute de l'incident
 SELECT 'logs' AS signal, count() AS records FROM payflow_otel.otel_logs
-WHERE Timestamp >= '2026-11-27 14:10:00' AND Timestamp < '2026-11-27 14:11:00'
+WHERE Timestamp >= pf_at('14:10') AND Timestamp < pf_at('14:11')
 UNION ALL
 SELECT 'spans', count() FROM payflow_otel.otel_traces
-WHERE Timestamp >= '2026-11-27 14:10:00' AND Timestamp < '2026-11-27 14:11:00'
+WHERE Timestamp >= pf_at('14:10') AND Timestamp < pf_at('14:11')
 UNION ALL
 SELECT 'metric points', count() FROM payflow_otel.otel_metrics_gauge
-WHERE TimeUnix >= '2026-11-27 14:10:00' AND TimeUnix < '2026-11-27 14:11:00';
--- Mesuré : 246 ms · 4,3 M lignes lues (32,9 Mo) · 74,6 Mo de mémoire
+WHERE TimeUnix >= pf_at('14:10') AND TimeUnix < pf_at('14:11');
+-- Mesuré : 56 ms · 5,4 M lignes lues (41,4 Mo) · 61,2 Mo de mémoire
 
 
--- ÉTAPE 6 · Checkpoint
+-- ÉTAPE 5 · Checkpoint
 SELECT
-    if((SELECT count() FROM payflow_otel.otel_traces) > 14000000, 'OK', 'KO')                                   AS spans,
+    if((SELECT count() FROM payflow_otel.otel_traces) > 60000000, 'OK', 'KO')                                   AS spans,
+    if((SELECT count() FROM (SELECT toDate(Timestamp) AS d FROM payflow_otel.otel_traces WHERE Timestamp < pf_day(1) GROUP BY d HAVING count() > 1000000)) = 30, 'OK', 'KO') AS thirty_days,
     if((SELECT max(Value) FROM payflow_otel.otel_metrics_gauge WHERE MetricName = 'hikaricp.connections.pending') > 20, 'OK', 'KO') AS pool_story,
-    if((SELECT max(Value) FROM payflow_otel.otel_metrics_sum WHERE MetricName = 'k8s.container.restarts') = 1, 'OK', 'KO')         AS restart_story,
+    if((SELECT max(Value) FROM payflow_otel.otel_metrics_gauge WHERE MetricName = 'k8s.container.restarts') = 1, 'OK', 'KO')       AS restart_story,
+    if((SELECT max(Value) FROM payflow_otel.otel_metrics_gauge WHERE MetricName = 'k8s.node.memory.usage'
+        AND ResourceAttributes['k8s.node.name'] = 'ip-10-0-3-17') > 16 * 1073741824, 'OK', 'KO')                              AS node_pressure,
     -- chaque ligne de log qui porte un trace id pointe vers un span qui existe
-    if((SELECT count() FROM (SELECT TraceId FROM payflow_otel.otel_logs WHERE TraceId != '' AND Timestamp BETWEEN '2026-11-27 14:10:00' AND '2026-11-27 14:10:10' LIMIT 1000)
-        WHERE TraceId NOT IN (SELECT TraceId FROM payflow_otel.otel_traces WHERE Timestamp BETWEEN '2026-11-27 14:09:50' AND '2026-11-27 14:10:20')) = 0, 'OK', 'KO') AS logs_to_traces
+    if((SELECT count() FROM (SELECT TraceId FROM payflow_otel.otel_logs WHERE TraceId != '' AND Timestamp BETWEEN pf_at('14:10:00') AND pf_at('14:10:10') LIMIT 1000)
+        WHERE TraceId NOT IN (SELECT TraceId FROM payflow_otel.otel_traces WHERE Timestamp BETWEEN pf_at('14:09:50') AND pf_at('14:10:20'))) = 0, 'OK', 'KO') AS logs_to_traces
 SETTINGS select_sequential_consistency = 1;
--- Mesuré : 203 ms · 4,1 M lignes lues (42,4 Mo) · 235,9 Mo de mémoire
+-- Mesuré : 652 ms · 84,2 M lignes lues (966,6 Mo) · 235,9 Mo de mémoire

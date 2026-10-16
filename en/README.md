@@ -1,8 +1,14 @@
 # ClickHouse from zero to advanced · Observability workshop
 
-Black Friday on **PayFlow**, a payment platform running on Kubernetes. At 13:58 a release cuts the database connection pool from 50 to 10. Payments start failing, retries pile up, a pod is killed for lack of memory. You collect every signal of that day on **your own ClickHouse Cloud service**, explore it in **ClickStack** (search, dashboards, alerts, service map, event patterns, AI notebooks), and see underneath, in SQL, how each feature works.
+**PayFlow** is a payment platform running on Kubernetes. Its last month of telemetry ends today, and last Friday was Black Friday: at 13:58 a release cut the database connection pool from 50 to 10. Payments failed, retries piled up, a pod was killed for lack of memory. You collect every signal of that month on **your own ClickHouse Cloud service**, explore it in **ClickStack** (search, dashboards, alerts, service map, event patterns, AI notebooks), and see underneath, in SQL, how each feature works.
 
-Logs, traces, metrics and Kubernetes events are **simulated in SQL**: no collector, no load generator, nothing to install. They follow the OpenTelemetry schema of the ClickHouse exporter exactly, so ClickStack reads them as if a real collector had written them. Everything is deterministic: everyone gets the same numbers. A live stream replays traffic every minute, and a switch lets you break production on purpose.
+Logs, traces, metrics and Kubernetes events are **simulated in SQL**: no collector, no load generator, nothing to install. They follow the OpenTelemetry schema of the ClickHouse exporter exactly, so ClickStack reads them as if a real collector had written them. The workshop has no fixed date: whenever you run it, the data covers the last 30 days up to the current minute, and Black Friday is the last Friday before today. Everything else is deterministic: everyone gets the same incident and the same numbers. A live stream keeps adding the current minute, and a switch lets you break production on purpose.
+
+| | Volume |
+|---|---|
+| An ordinary day | about 110,000 requests, 1.7 million spans, 600,000 log lines (a quarter less at weekends) |
+| Black Friday | 1.4 million requests, 21.5 million spans, 7.8 million log lines |
+| The month | about 70 million spans, 25 million log lines, 25 million metric points; loaded in about 8 minutes |
 
 ---
 
@@ -74,17 +80,17 @@ flowchart LR
    | Region | AWS **eu-central-1** (or the closest to you) | |
    | Replicas | **3** | the big scans are spread across the 3 (module 7) |
    | Memory per replica | **64 GB** (16 vCPU), **minimum = maximum** | fixed size: no waiting for autoscaling during a demo |
-   | Idling | **after 1 hour** of inactivity, at least | the service does not sleep during a break |
+   | Idling | **after 1 hour** of inactivity, at least | the service does not sleep during a break; the live stream does not keep it awake |
 
    Indicative cost: about $11 per hour at most with this size, under $70 for the day. The calculator on [clickhouse.com/pricing](https://clickhouse.com/pricing) gives the exact rate.
-3. **Open the SQL console** of the service and run `SELECT version()`. Then open **ClickStack** from the left menu once, to check that it is available on your service.
+3. **Open the SQL console** of the service and run `SELECT version()`. Then open **ClickStack** from the left menu once, to check that it is available on your service. Module 3 walks you through ClickStack from the first click: no prior knowledge needed.
 4. Optional, to catch up from the command line: install the native client (`curl https://clickhouse.com/ | sh`).
 
 Each SQL file is run in the SQL console, statement by statement or all at once. Every statement stays under 60 seconds. Every file ends with a checkpoint that must show `OK` everywhere. Each module with a ClickStack part has a README with the steps in the UI.
 
 ---
 
-## Schedule (5 hours)
+## Schedule (5 h 30)
 
 | Time | Module | ClickStack | SQL underneath | Duration |
 |---|---|---|---|---|
@@ -94,11 +100,11 @@ Each SQL file is run in the SQL console, statement by statement or all at once. 
 | 1:15 | **03** Search and correlation | sources, Lucene and SQL search, saved search, live tail, log to trace to pod; three investigations, from a log, a metric alert, a trace | the text indexes, EXPLAIN, the three scenarios in SQL | 45 min |
 | 2:00 | break | | | 10 min |
 | 2:10 | **04** Dashboards | Chart Explorer, a dashboard with filters, release markers, row-click drilldown, SQL tiles, presets, text-to-chart | RED rollups (spanmetrics), the latency histogram with exemplars | 35 min |
-| 2:45 | **05** SLOs and alerts | search, chart and SQL alerts, a webhook; **break production and get paged** | error budget, burn rate, multi-window alerting | 30 min |
-| 3:15 | **06** Investigation | service map, event patterns, event deltas, release markers, infrastructure tab | the 10 questions, the trace as a tree, the cost of the incident | 40 min |
-| 3:55 | break | | | 10 min |
-| 4:05 | **07** Scale and cost | a rollup registered on the source | 875 M log lines: text index, bloom filter, projection, caches, 3 replicas; retention, sampling, sizing | 35 min |
-| 4:40 | **08** AI and governance | AI notebooks, MCP, RBAC | ClickHouse Agents, row policies, GDPR delete, a status API | 20 min |
+| 2:45 | **05** SLOs and alerts | search, Chart Explorer and SQL tile alerts, email or webhook, thresholds chosen on the data; **break production and get paged** | error budget, burn rate, multi-window alerting | 35 min |
+| 3:20 | **06** Investigation | service map, event patterns, event deltas, release markers, infrastructure tab, AI notebook | the 10 questions, the trace as a tree, the cost of the incident | 45 min |
+| 4:05 | break | | | 10 min |
+| 4:15 | **07** Scale and cost | a rollup registered on the source, the ACCELERATED badge | 875 M log lines: text index, bloom filter, projection, caches, 3 replicas; retention, sampling, sizing | 35 min |
+| 4:50 | **08** AI and governance | AI notebooks, MCP, RBAC with fine-grained rules, Terraform export | ClickHouse Agents, row policies, GDPR delete, a status API | 40 min |
 
 ---
 
@@ -125,9 +131,9 @@ Resumes from a module to the end.
 ```bash
 ./run_all.sh
 ```
-Everything from scratch, reset included: about 10 minutes.
+Everything from scratch, reset included: about 15 minutes. The data is generated for the day you run it.
 
-At the end of the day, run `stop_live_stream.sql`: the live stream refreshes every minute and keeps the service awake. `reset.sql` removes only what the workshop created: the `payflow_*` databases, user and roles, and the `pf_*` functions.
+At the end of the day, run `stop_live_stream.sql`: the live stream runs the simulator every minute. `reset.sql` removes only what the workshop created: the `payflow_*` databases, user and roles, and the `pf_*` functions.
 
 ---
 

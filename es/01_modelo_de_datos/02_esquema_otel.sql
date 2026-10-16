@@ -26,9 +26,8 @@
 --    · filtros bloom sobre TraceId, minmax sobre Duration.
 --    · DateTime64(9) con Delta + ZSTD: marcas de tiempo al nanosegundo casi gratis.
 --    · PARTITION BY día y TTL con ttl_only_drop_parts: los días caducados se borran como
---      parts enteras. Aquí la retención es de 3 años para que los datos del taller
---      (noviembre de 2026) nunca caduquen durante el curso; en ClickStack el valor por
---      defecto es 3 días (módulo 7).
+--      parts enteras. Aquí la retención es de 3 años, para que el mes de datos del taller
+--      nunca caduque durante el curso; en ClickStack el valor por defecto es 3 días (módulo 7).
 -- =====================================================================
 
 

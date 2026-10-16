@@ -14,13 +14,16 @@
 --  El DELETE ligero marca las filas como borradas al instante (desaparecen de todas
 --  las consultas) y el espacio se recupera en los siguientes merges. Sin reescribir la tabla.
 SELECT count() AS lines_before FROM payflow_otel.otel_logs WHERE LogAttributes['merchant_id'] = 'm_00042';
--- Medido: 540 ms · 3,4 M filas leídas (19,1 MB) · 206,7 MB de memoria
+-- Medido: 1,35 s · 23,3 M filas leídas (111,9 MB) · 145,8 MB de memoria
 
 DELETE FROM payflow_otel.otel_logs WHERE LogAttributes['merchant_id'] = 'm_00042';
--- Medido: 1,03 s
+-- Medido: 23,2 s
 
-SELECT count() AS lines_after FROM payflow_otel.otel_logs WHERE LogAttributes['merchant_id'] = 'm_00042';
--- Medido: 69 ms · 3,4 M filas leídas (20,6 MB) · 265 MB de memoria
+--  El flujo en directo sigue generando pagos de este comercio (sigue siendo cliente):
+--  lo que cuenta es que no quede nada de lo escrito antes de la solicitud.
+SELECT count() AS lines_after FROM payflow_otel.otel_logs
+WHERE LogAttributes['merchant_id'] = 'm_00042' AND Timestamp < now() - INTERVAL 5 MINUTE;
+-- Medido: 418 ms · 23,3 M filas leídas (309,3 MB) · 268,5 MB de memoria
 
 
 -- PASO 2 · Cada equipo ve su propio namespace
@@ -33,7 +36,7 @@ CREATE ROW POLICY OR REPLACE pf_payments_logs   ON payflow_otel.otel_logs   USIN
 CREATE ROW POLICY OR REPLACE pf_payments_traces ON payflow_otel.otel_traces USING ResourceAttributes['k8s.namespace.name'] = 'payments' TO payflow_team_payments;
 --  La tabla de aterrizaje de la pasarela es del pipeline, nadie más escribe en ella.
 REVOKE ALL ON payflow_ingest.* FROM payflow_team_payments;
--- Medido: 5 ms
+-- Medido: 7 ms
 
 SELECT short_name, database, table, select_filter, apply_to_list
 FROM system.row_policies
@@ -57,21 +60,21 @@ FROM clusterAllReplicas('default', system.query_log)
 WHERE type = 'QueryFinish' AND event_date >= today() - 1 AND has(databases, 'payflow_otel')
 GROUP BY query_kind
 ORDER BY queries DESC;
--- Medido: 23 ms · 17 263 filas leídas (605,3 KB)
+-- Medido: 29 ms · 106 751 filas leídas (3,8 MB)
 
 SELECT view_name, count() AS runs, round(avg(view_duration_ms), 1) AS avg_ms, sum(written_rows) AS rows_written
 FROM clusterAllReplicas('default', system.query_views_log)
 WHERE event_date >= today() - 1 AND view_name LIKE 'payflow\\_%'
 GROUP BY view_name
 ORDER BY rows_written DESC;
--- Medido: 17 ms · 2 927 filas leídas (55,4 KB)
+-- Medido: 17 ms · 9 073 filas leídas (245,1 KB)
 -- Qué observar: las vistas materializadas de los módulos 3 y 5, cuántas veces se
 -- ejecutaron y cuántas filas escribieron. Es la salud del pipeline.
 
 
 -- PASO 4 · Checkpoint
 SELECT
-    if((SELECT count() FROM payflow_otel.otel_logs WHERE LogAttributes['merchant_id'] = 'm_00042') = 0, 'OK', 'KO') AS gdpr_delete,
+    if((SELECT count() FROM payflow_otel.otel_logs WHERE LogAttributes['merchant_id'] = 'm_00042' AND Timestamp < now() - INTERVAL 5 MINUTE) = 0, 'OK', 'KO') AS gdpr_delete,
     if((SELECT count() FROM system.row_policies WHERE short_name LIKE 'pf\\_payments%') = 2, 'OK', 'KO')            AS row_policies
 SETTINGS select_sequential_consistency = 1;
--- Medido: 17 ms · 14 filas leídas (3,1 KB)
+-- Medido: 508 ms · 23,3 M filas leídas (309,3 MB) · 264,7 MB de memoria

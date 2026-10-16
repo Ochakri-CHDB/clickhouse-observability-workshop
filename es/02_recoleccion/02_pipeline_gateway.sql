@@ -8,7 +8,7 @@
 --  ClickHouse para el procesamiento pesado: una tabla de aterrizaje con el motor Null
 --  (no guarda nada) y vistas materializadas que procesan cada bloque insertado de
 --  camino a las tablas OpenTelemetry. Cada vista hace de uno o varios procesadores:
---    · filter        descarta los health checks del kubelet (ruido, ~4 % del volumen)
+--    · filter        descarta los health checks del kubelet (ruido, una parte del volumen)
 --    · transform     parsea 4 formatos de log: severidad, trace id, mensaje, atributos
 --    · k8sattributes añade deployment, versión, nodo, zona y equipo a partir del pod
 --    · redaction     enmascara los números de tarjeta; con la tabla Null nunca se guarda
@@ -97,12 +97,12 @@ SELECT
 FROM
 (
     SELECT JSONExtractString(payload, 'log') AS line
-    FROM payflow_sim.raw_records(from_s = 51000, to_s = 51001)
+    FROM payflow_sim.raw_records(from_t = pf_at('14:10:00'), to_t = pf_at('14:10:01'))
     WHERE source = 'filelog' AND payload NOT LIKE '%health%'
     LIMIT 1 BY splitByChar('/', JSONExtractString(payload, 'log.file.path'))[6], pf_log_severity(JSONExtractString(payload, 'log'))
 )
 FORMAT Vertical;
--- Medido: 731 ms · 198 filas leídas (8,3 KB)
+-- Medido: 643 ms · 225 filas leídas (12,8 KB) · 60,6 MB de memoria
 -- Qué observar: una línea por servicio y severidad. Entran cinco formatos, sale un modelo.
 
 --  k8sattributes: el agente solo conoce la ruta del fichero. La pasarela la parsea y pide el
@@ -180,7 +180,17 @@ SELECT
         'k8s.event.type', JSONExtractString(payload, 'type'),
         'k8s.object.kind', JSONExtractString(payload, 'involvedObject', 'kind'),
         'k8s.object.name', JSONExtractString(payload, 'involvedObject', 'name'),
-        'k8s.event.source', JSONExtractString(payload, 'source', 'component'))    AS LogAttributes,
+        'k8s.event.source', JSONExtractString(payload, 'source', 'component'),
+        -- lo que lee el Pod Timeline de ClickStack: el evento tal como lo devuelve la API events.k8s.io
+        'k8s.resource.name', 'events',
+        'object', toJSONString(CAST((
+            tuple(JSONExtractString(payload, 'firstTimestamp')),
+            JSONExtractString(payload, 'reason'), JSONExtractString(payload, 'message'), JSONExtractString(payload, 'type'),
+            (JSONExtractString(payload, 'involvedObject', 'kind'), JSONExtractString(payload, 'involvedObject', 'name'),
+             JSONExtractString(payload, 'involvedObject', 'namespace'),
+             dictGetOrDefault('payflow_inventory.dict_pod', 'pod_uid', JSONExtractString(payload, 'involvedObject', 'name'), ''))),
+            'Tuple(metadata Tuple(creationTimestamp String), reason String, note String, type String, regarding Tuple(kind String, name String, namespace String, uid String))')))
+                                                                              AS LogAttributes,
     JSONExtractString(payload, 'reason')                                      AS EventName
 FROM payflow_ingest.agent_records
 WHERE source = 'k8sobjects';
@@ -212,22 +222,32 @@ FROM payflow_ingest.agent_records
 GROUP BY minute, service, severity, dropped;
 
 
--- PASO 4 · Los agentes envían el día, a través de la pasarela
---  6 lotes de 4 horas. Cada INSERT ejecuta el simulador y luego las 3 vistas: parseo,
---  enriquecimiento y enmascarado ocurren en la misma sentencia, por debajo de los 60 s
---  de la consola.
-INSERT INTO payflow_ingest.agent_records SELECT * FROM payflow_sim.raw_records(from_s = 0, to_s = 14400);       -- de 00:00 a 04:00
--- Medido: 11,8 s · 2 M filas leídas (737,4 MB) · 1,3 M filas escritas · 2,5 GB de memoria
-INSERT INTO payflow_ingest.agent_records SELECT * FROM payflow_sim.raw_records(from_s = 14400, to_s = 28800);   -- de 04:00 a 08:00
--- Medido: 11,6 s · 2,1 M filas leídas (748,9 MB) · 1,3 M filas escritas · 2,6 GB de memoria
-INSERT INTO payflow_ingest.agent_records SELECT * FROM payflow_sim.raw_records(from_s = 28800, to_s = 43200);   -- de 08:00 a 12:00
--- Medido: 12,7 s · 2,4 M filas leídas (866,2 MB) · 1,5 M filas escritas · 2,7 GB de memoria
-INSERT INTO payflow_ingest.agent_records SELECT * FROM payflow_sim.raw_records(from_s = 43200, to_s = 57600);   -- de 12:00 a 16:00
--- Medido: 14,8 s · 4,7 M filas leídas (1,7 GB) · 3 M filas escritas · 4,8 GB de memoria
-INSERT INTO payflow_ingest.agent_records SELECT * FROM payflow_sim.raw_records(from_s = 57600, to_s = 72000);   -- de 16:00 a 20:00
--- Medido: 16,1 s · 7 M filas leídas (2,5 GB) · 4,6 M filas escritas · 7,3 GB de memoria
-INSERT INTO payflow_ingest.agent_records SELECT * FROM payflow_sim.raw_records(from_s = 72000, to_s = 86400);   -- de 20:00 a 24:00
--- Medido: 16,1 s · 6,4 M filas leídas (2,3 GB) · 4,2 M filas escritas · 6,7 GB de memoria
+-- PASO 4 · Los agentes envían el mes, a través de la pasarela
+--  Cada INSERT ejecuta el simulador y luego las 3 vistas: parseo, enriquecimiento y
+--  enmascarado ocurren en la misma sentencia, por debajo de los 60 s de la consola.
+--  Los días ordinarios van en lotes de 4 o 5 días; Black Friday, doce veces más
+--  cargado, por tercios de día.
+INSERT INTO payflow_ingest.agent_records SELECT * FROM payflow_sim.raw_records(from_t = pf_day(-29), to_t = pf_day(-25));
+-- Medido: 18,7 s · 8,1 M filas leídas (2,7 GB) · 4,8 M filas escritas · 5,8 GB de memoria
+INSERT INTO payflow_ingest.agent_records SELECT * FROM payflow_sim.raw_records(from_t = pf_day(-25), to_t = pf_day(-21));
+-- Medido: 20 s · 9 M filas leídas (3 GB) · 5,4 M filas escritas · 7,7 GB de memoria
+INSERT INTO payflow_ingest.agent_records SELECT * FROM payflow_sim.raw_records(from_t = pf_day(-21), to_t = pf_day(-17));
+-- Medido: 17,7 s · 8 M filas leídas (2,7 GB) · 4,8 M filas escritas · 6,1 GB de memoria
+INSERT INTO payflow_ingest.agent_records SELECT * FROM payflow_sim.raw_records(from_t = pf_day(-17), to_t = pf_day(-13));
+-- Medido: 19,4 s · 9 M filas leídas (3 GB) · 5,4 M filas escritas · 7,6 GB de memoria
+INSERT INTO payflow_ingest.agent_records SELECT * FROM payflow_sim.raw_records(from_t = pf_day(-13), to_t = pf_day(-9));
+-- Medido: 18 s · 8 M filas leídas (2,7 GB) · 4,8 M filas escritas · 5,8 GB de memoria
+INSERT INTO payflow_ingest.agent_records SELECT * FROM payflow_sim.raw_records(from_t = pf_day(-9), to_t = pf_day(-5));
+-- Medido: 17,5 s · 8,5 M filas leídas (2,9 GB) · 5,1 M filas escritas · 5,8 GB de memoria
+INSERT INTO payflow_ingest.agent_records SELECT * FROM payflow_sim.raw_records(from_t = pf_day(-5), to_t = pf_day(0));
+-- Medido: 19,6 s · 10,8 M filas leídas (3,6 GB) · 6,5 M filas escritas · 9 GB de memoria
+--  Black Friday
+INSERT INTO payflow_ingest.agent_records SELECT * FROM payflow_sim.raw_records(from_t = pf_at('00:00'), to_t = pf_at('10:00'));
+-- Medido: 14,1 s · 4,9 M filas leídas (1,8 GB) · 3,2 M filas escritas · 4,8 GB de memoria
+INSERT INTO payflow_ingest.agent_records SELECT * FROM payflow_sim.raw_records(from_t = pf_at('10:00'), to_t = pf_at('17:00'));
+-- Medido: 15,7 s · 7,3 M filas leídas (2,6 GB) · 4,8 M filas escritas · 6,8 GB de memoria
+INSERT INTO payflow_ingest.agent_records SELECT * FROM payflow_sim.raw_records(from_t = pf_at('17:00'), to_t = pf_day(1));
+-- Medido: 20,5 s · 11,7 M filas leídas (4,3 GB) · 7,7 M filas escritas · 10,7 GB de memoria
 
 SELECT count() AS records_in_landing_table FROM payflow_ingest.agent_records;
 -- Medido: 2 ms
@@ -241,15 +261,15 @@ SELECT
     round(100 * sumIf(records, dropped) / sum(records), 1)          AS dropped_pct,
     formatReadableSize(sumIf(bytes, dropped))                       AS bytes_saved
 FROM payflow_sre.log_volume_1m;
--- Medido: 4 ms · 30 440 filas leídas (505,4 KB)
+-- Medido: 54 ms · 822 544 filas leídas (13,3 MB)
 
 SELECT ServiceName, ResourceAttributes['service.version'] AS version, ResourceAttributes['service.team'] AS team,
        ResourceAttributes['cloud.availability_zone'] AS zone, count() AS log_records
 FROM payflow_otel.otel_logs
-WHERE ServiceName = 'payment' AND Timestamp BETWEEN '2026-11-27 14:00:00' AND '2026-11-27 14:05:00'
+WHERE ServiceName = 'payment' AND Timestamp BETWEEN pf_at('14:00') AND pf_at('14:05')
 GROUP BY ALL
 ORDER BY log_records DESC;
--- Medido: 166 ms · 2,2 M filas leídas (14,9 MB) · 103,2 MB de memoria
+-- Medido: 29 ms · 502 877 filas leídas (3,8 MB)
 -- Qué observar: el agente solo envió una ruta de fichero. Versión, equipo y zona los ha
 -- añadido la pasarela. Durante el rollout, las dos versiones escriben logs en paralelo.
 
@@ -259,7 +279,7 @@ SELECT
     any(if(Body LIKE '%pan=%', Body, NULL))           AS example
 FROM payflow_otel.otel_logs
 WHERE ServiceName = 'card-network-adapter';
--- Medido: 253 ms · 4,5 M filas leídas (251,2 MB) · 92,7 MB de memoria
+-- Medido: 376 ms · 20,7 M filas leídas (1,3 GB) · 324,2 MB de memoria
 -- Qué observar: cero números de tarjeta completos guardados, todos enmascarados.
 
 
@@ -271,4 +291,4 @@ SELECT
     if((SELECT countIf(ResourceAttributes['service.team'] = '' AND ServiceName != 'k8s-events') FROM payflow_otel.otel_logs) = 0, 'OK', 'KO') AS enrichment,
     if((SELECT countIf(TraceId != '') / count() FROM payflow_otel.otel_logs) > 0.9, 'OK', 'KO')                  AS trace_ids
 SETTINGS select_sequential_consistency = 1;
--- Medido: 542 ms · 23,5 M filas leídas (823,6 MB) · 152,3 MB de memoria
+-- Medido: 1,32 s · 73,8 M filas leídas (2,5 GB) · 324,3 MB de memoria

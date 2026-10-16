@@ -1,12 +1,17 @@
 -- =====================================================================
 --  MÓDULO 2 · Recolección (1/4): las aplicaciones y sus agentes, simulados en SQL
 -- =====================================================================
---  Ni generador de carga ni colector que instalar: todo el día lo genera
+--  Ni generador de carga ni colector que instalar: todo el mes lo genera
 --  el propio ClickHouse, a partir de numbers() y unas pocas funciones SQL.
 --  Todo es determinista (cityHash64 en lugar de rand()): cada asistente
 --  obtiene exactamente las mismas peticiones, los mismos errores, las mismas cifras.
+--  El azar depende del tiempo relativo a Black Friday, no de la fecha del
+--  calendario: sea cual sea el día en que lo ejecutes, el incidente es el mismo.
 --
---  El día: viernes 27 de noviembre de 2026, en UTC.
+--  El mes: 30 días que terminan con Black Friday (módulo 1, pf_black_friday()).
+--    · un día ordinario: unas 110 000 peticiones, una cuarta parte menos el fin de semana
+--    · Black Friday: unos 1,4 millones, 12 veces un día ordinario
+--  Black Friday, en UTC:
 --    · el tráfico sigue el ritmo del día, con un pico por la tarde a las 19:30
 --    · de 13:57 a 14:36: una venta flash multiplica el tráfico por 1,6
 --    · 13:58: despliegue de payment v2.4.1 (pool de conexiones recortado de 50 a 10)
@@ -26,17 +31,20 @@
 --  La misma petición recibe siempre los mismos valores "aleatorios".
 CREATE OR REPLACE FUNCTION pf_r AS (id, seed) -> cityHash64(id, seed) / 18446744073709551616.0;
 
---  Peticiones por segundo en el segundo s del día (de 0 a 86 399).
+--  Peticiones por segundo en el segundo s del día de Black Friday (de 0 a 86 399).
 CREATE OR REPLACE FUNCTION pf_rate AS (s) ->
     30 * (0.25 + 0.75 * exp(-pow((s / 3600 - 19.5) / 5.5, 2)))     -- la forma del día, pico a las 19:30
        * if(s >= 50220 AND s < 52560, 1.6, 1.0)                      -- venta flash, de 13:57 a 14:36
        * if(s >= 50700 AND s < 53100, 1.25, 1.0);                    -- reintentos de clientes, de 14:05 a 14:45
 
---  Qué versión ejecuta un slot de pod de payment en el instante t (rollout: un pod
---  cada 30 s, rollback: un pod cada 20 s). Es la causa del incidente.
-CREATE OR REPLACE FUNCTION pf_payment_version AS (slot, t) ->
-    if(t >= toDateTime('2026-11-27 13:58:00', 'UTC') + toIntervalSecond(slot * 30)
-       AND t < toDateTime('2026-11-27 14:42:00', 'UTC') + toIntervalSecond(slot * 20), 'v2.4.1', 'v2.4.0');
+--  Un día ordinario: la misma forma, el 8 % del tráfico de Black Friday, menos el fin de semana.
+--  dow es el día de la semana, de 1 = lunes a 7 = domingo.
+CREATE OR REPLACE FUNCTION pf_rate_normal AS (s, dow) ->
+    2.4 * (0.25 + 0.75 * exp(-pow((s / 3600 - 19.5) / 5.5, 2))) * if(dow >= 6, 0.75, 1);
+--  El ritmo en cualquier momento del mes: Black Friday o un día ordinario.
+CREATE OR REPLACE FUNCTION pf_rate_at AS (t) ->
+    if(toDate(t) = pf_black_friday(), pf_rate(toUInt32(toUnixTimestamp(t) % 86400)),
+       pf_rate_normal(toUInt32(toUnixTimestamp(t) % 86400), toDayOfWeek(t)));
 
 --  La zona de disponibilidad va codificada en el nombre del nodo: ip-10-0-<zona>-xx
 CREATE OR REPLACE FUNCTION pf_zone AS (node) -> concat('eu-west-1', ['a', 'b', 'c'][toUInt8(splitByChar('-', node)[4])]);
@@ -71,23 +79,27 @@ RANGE(MIN started_at MAX stopped_at)
 LIFETIME(0);
 
 SELECT
-    dictGet('payflow_sim.dict_pod', 'pod_name', ('payment', toUInt8(0)), toDateTime('2026-11-27 13:00:00', 'UTC')) AS at_13h,
-    dictGet('payflow_sim.dict_pod', 'pod_name', ('payment', toUInt8(0)), toDateTime('2026-11-27 14:10:00', 'UTC')) AS at_14h10,
-    dictGet('payflow_sim.dict_pod', 'pod_name', ('payment', toUInt8(0)), toDateTime('2026-11-27 15:00:00', 'UTC')) AS at_15h;
--- Medido: 1 ms · 1 fila leída
--- Qué observar: tres nombres de pod distintos para el mismo slot.
+    dictGet('payflow_sim.dict_pod', 'pod_name', ('payment', toUInt8(0)), pf_day(-20))     AS three_weeks_before,
+    dictGet('payflow_sim.dict_pod', 'pod_name', ('payment', toUInt8(0)), pf_at('13:00')) AS at_13h,
+    dictGet('payflow_sim.dict_pod', 'pod_name', ('payment', toUInt8(0)), pf_at('14:10')) AS at_14h10,
+    dictGet('payflow_sim.dict_pod', 'pod_name', ('payment', toUInt8(0)), pf_at('15:00')) AS at_15h;
+-- Medido: 4 ms · 2 filas leídas
+-- Qué observar: el pod del mismo slot, en cuatro momentos: v2.3.9, v2.4.0, v2.4.1,
+-- y de nuevo v2.4.0 tras el rollback.
 
 
 -- PASO 3 · Las peticiones
---  Una vista parametrizada: se llama como una función de tabla, con el rango
---  de segundos que generar. Una fila por petición HTTP que llega al api-gateway.
---  Cada valor de una petición (tipo, comercio, importe, pods, errores, duraciones)
---  se deriva de su id, rid.
+--  Una vista parametrizada: se llama como una función de tabla, con el rango de
+--  tiempo que generar. Una fila por petición HTTP que llega al api-gateway. Cada
+--  valor de una petición (tipo, comercio, importe, pods, errores, duraciones) se
+--  deriva de su id.
 CREATE OR REPLACE VIEW payflow_sim.requests AS
 SELECT
     sec,
-    cityHash64(sec, i) AS rid,   -- un id por (segundo, índice de la petición en el segundo)
-    fromUnixTimestamp64Nano(toInt64(1795737600000000000 + sec * 1000000000 + toUInt64(pf_r(rid, 'ns') * 1e9)), 'UTC') AS ts,
+    black_friday,
+    s,
+    cityHash64(rel, i) AS rid,   -- un id por (segundo, índice de la petición en el segundo)
+    fromUnixTimestamp64Nano(toInt64(sec * 1000000000 + toUInt64(pf_r(rid, 'ns') * 1e9)), 'UTC') AS ts,
     multiIf(pf_r(rid, 'kind') < 0.72, 'POST /v1/payments',
             pf_r(rid, 'kind') < 0.87, 'GET /v1/payments/{id}',
             pf_r(rid, 'kind') < 0.95, 'POST /v1/refunds',
@@ -108,27 +120,39 @@ SELECT
     toUInt8(cityHash64(rid, 'cn') % 4)   AS slot_card,
     toUInt8(cityHash64(rid, 'le') % 3)   AS slot_ledger,
     toUInt8(cityHash64(rid, 'no') % 3)   AS slot_notif,
-    pf_payment_version(slot_payment, toDateTime(ts))                                             AS payment_version,
-    pf_rate(sec)                                                                                 AS rate,
     -- el incidente: v2.4.1 tiene 10 conexiones en lugar de 50. Con carga, las peticiones esperan
     -- una conexión; pasados 3 s HikariCP se rinde. Cuanto más cargada la plataforma, más fallos.
-    payment_version = 'v2.4.1'                                                                   AS bad_version,
+    dictGet('payflow_sim.dict_pod', 'version', ('payment', slot_payment), toDateTime(ts)) = 'v2.4.1' AS bad_version,
     bad_version AND pf_r(rid, 'pgfail') < least(0.30, greatest(0.02, (rate - 15) / 60))
                     * if(route IN ('POST /v1/payments', 'POST /v1/refunds'), 1, 0.5)            AS pool_timeout,
     toUInt32(multiIf(pool_timeout, 3000000 + pf_r(rid, 'pgt') * 40000,
                      bad_version,  120000 + 2600000 * pow(pf_r(rid, 'pgw'), 2.5),
                      2500 + 5500 * pf_r(rid, 'pgn')))                                            AS db_us,
-    sec >= 50700 AND sec < 53100                                                                 AS retry_storm,
-    slot_fraud = 2 AND sec >= 51667 AND sec < 51712                                              AS fraud_down,   -- OOMKilled, reiniciando
+    black_friday AND s >= 50700 AND s < 53100                                                    AS retry_storm,
+    black_friday AND slot_fraud = 2 AND s >= 51667 AND s < 51712                                 AS fraud_down,   -- OOMKilled, reiniciando
     pf_r(rid, 'declined') < 0.035                                                                AS declined,
-    pf_r(rid, 'cardto') < 0.0012                                                                 AS card_timeout
+    pf_r(rid, 'cardto') < 0.0012                                                                 AS card_timeout,
+    rate
 FROM
 (
-    SELECT number AS sec,
-           toUInt32(round(pf_rate(number) * (0.85 + 0.3 * pf_r(number, 'n')))) AS n_req
-    FROM numbers({from_s:UInt32}, {to_s:UInt32} - {from_s:UInt32})
+    SELECT
+        number                                                       AS sec,
+        toInt64(number) - toInt64(toUnixTimestamp(pf_day(0)))        AS rel,   -- segundos desde las 00:00 de Black Friday
+        rel >= 0 AND rel < 86400                                     AS black_friday,
+        toUInt32(number % 86400)                                     AS s,     -- segundo del día, UTC
+        if(black_friday, pf_rate(s), pf_rate_normal(s, toDayOfWeek(toDateTime(number, 'UTC')))) AS rate,
+        toUInt32(if(black_friday, round(rate * (0.85 + 0.3 * pf_r(rel, 'n'))), floor(rate + pf_r(rel, 'n')))) AS n_req
+    FROM numbers(toUnixTimestamp({from_t:DateTime}), toUnixTimestamp({to_t:DateTime}) - toUnixTimestamp({from_t:DateTime}))
 )
 ARRAY JOIN range(n_req) AS i;
+
+SELECT toDate(toDateTime(sec, 'UTC')) AS day, toDayOfWeek(day) AS dow, count() AS requests
+FROM payflow_sim.requests(from_t = pf_day(-29), to_t = pf_day(1))
+GROUP BY day
+ORDER BY day;
+-- Medido: 137 ms · 2,6 M filas leídas (19,8 MB)
+-- Qué observar: el mes de un vistazo. Unas 110 000 peticiones en un día ordinario,
+-- una cuarta parte menos los sábados y domingos (dow 6 y 7), y 1,4 millones en Black Friday.
 
 SELECT
     toStartOfFiveMinutes(toDateTime(ts)) AS minute,
@@ -136,13 +160,13 @@ SELECT
     round(count() / 300, 1) AS per_second,
     countIf(bad_version) AS on_v241,
     countIf(pool_timeout) AS timeouts
-FROM payflow_sim.requests(from_s = 49800, to_s = 54000)
+FROM payflow_sim.requests(from_t = pf_at('13:50'), to_t = pf_at('15:00'))
 GROUP BY minute
 ORDER BY minute;
--- Medido: 59 ms · 4 200 filas leídas (32,8 KB)
--- Qué observar: de 13:55 a 15:00, de cinco en cinco minutos. La parte de peticiones
--- servidas por v2.4.1 sube de 13:58 a 14:01, los timeouts siguen a la carga, todo
--- se detiene a las 14:42.
+-- Medido: 73 ms · 4 201 filas leídas (32,8 KB)
+-- Qué observar: Black Friday de 13:50 a 15:00, de cinco en cinco minutos. La parte de
+-- peticiones servidas por v2.4.1 sube de 13:58 a 14:01, los timeouts siguen a la carga,
+-- todo se detiene a las 14:42.
 
 
 -- PASO 4 · Los spans de cada petición (tracing distribuido)
@@ -291,15 +315,15 @@ SELECT
     CAST([], 'Array(String)')                                                                AS `Links.SpanId`,
     CAST([], 'Array(String)')                                                                AS `Links.TraceState`,
     CAST([], 'Array(Map(String, String))')                                                   AS `Links.Attributes`
-FROM payflow_sim.requests(from_s = {from_s:UInt32}, to_s = {to_s:UInt32})
+FROM payflow_sim.requests(from_t = {from_t:DateTime}, to_t = {to_t:DateTime})
 ARRAY JOIN if(route = 'POST /v1/payments', spans_payment, spans_other) AS sp
 WHERE sp.keep;
 
 SELECT ServiceName, SpanName, count() AS spans, round(quantile(0.99)(Duration) / 1e6, 1) AS p99_ms, countIf(StatusCode = 'Error') AS errors
-FROM payflow_sim.spans(from_s = 51000, to_s = 51060)   -- un minuto a las 14:10
+FROM payflow_sim.spans(from_t = pf_at('14:10'), to_t = pf_at('14:11'))   -- un minuto de Black Friday
 GROUP BY ServiceName, SpanName
 ORDER BY spans DESC;
--- Medido: 245 ms · 60 filas leídas
+-- Medido: 272 ms · 61 filas leídas
 -- Qué observar: un minuto del incidente. INSERT payflow.payments tiene un p99 de
 -- 3 segundos y cientos de errores; todo lo que está por encima hereda la latencia.
 
@@ -331,7 +355,7 @@ SELECT
     TraceId                                                   AS tid,
     SpanId                                                    AS sid,
     line
-FROM payflow_sim.spans(from_s = {from_s:UInt32}, to_s = {to_s:UInt32})
+FROM payflow_sim.spans(from_t = {from_t:DateTime}, to_t = {to_t:DateTime})
 ARRAY JOIN multiIf(
     -- access log de nginx: texto plano, el código de estado indica la severidad
     ServiceName = 'api-gateway',
@@ -382,17 +406,16 @@ WHERE SpanKind IN ('Server', 'Consumer');
 
 
 -- PASO 7 · Logs de infraestructura: health checks, arranques de pods, OOM
---  · cada pod responde a un health check del kubelet cada 10 s (ruido, pero volumen real)
---  · cada pod nuevo registra su arranque. Lee con atención las líneas de payment v2.4.1.
+--  · cada pod responde a un health check del kubelet cada 30 s (ruido, pero volumen real)
+--  · cada pod nuevo de payment registra su arranque. Lee con atención las líneas de v2.4.1.
 --  · el worker de fraud-scoring que el kernel mata a las 14:21:07, y su reinicio
 CREATE OR REPLACE VIEW payflow_sim.infra_log_lines AS
-WITH toDateTime64('2026-11-27 00:00:00', 9, 'UTC') AS day0
 SELECT t, svc, res, '' AS tid, '' AS sid, line
 FROM
 (
-    -- health checks: una línea por pod cada 10 segundos
+    -- health checks: una línea por pod en ejecución cada 30 segundos
     SELECT
-        addSeconds(day0, s) + toIntervalMillisecond(cityHash64(p.pod_name, s) % 1000)               AS t,
+        toDateTime64(s, 9, 'UTC') + toIntervalMillisecond(cityHash64(p.pod_name, s) % 1000)       AS t,
         p.deployment                                                                                  AS svc,
         map('service.name', p.deployment, 'service.version', p.version, 'k8s.cluster.name', 'payflow-prod-eu',
             'k8s.namespace.name', p.namespace, 'k8s.deployment.name', p.deployment, 'k8s.pod.name', p.pod_name,
@@ -403,12 +426,12 @@ FROM
                 p.deployment = 'fraud-scoring', 'INFO:gunicorn.access:"GET /healthz HTTP/1.1" 200 2',
                 concat('{"level":"debug","ts":"', pf_ts_iso(t), '","msg":"health check","path":"/healthz","status":200}')) AS line
     FROM payflow_inventory.pod AS p
-    ARRAY JOIN range(intDiv({from_s:UInt32} + 9, 10) * 10, {to_s:UInt32}, 10) AS s
-    WHERE addSeconds(day0, s) >= p.started_at AND addSeconds(day0, s) < p.stopped_at
+    ARRAY JOIN range(intDiv(toUnixTimestamp({from_t:DateTime}) + 29, 30) * 30, toUnixTimestamp({to_t:DateTime}), 30) AS s
+    WHERE toDateTime(s, 'UTC') >= p.started_at AND toDateTime(s, 'UTC') < p.stopped_at
 
     UNION ALL
 
-    -- logs de arranque de los pods que arrancan dentro de la ventana
+    -- logs de arranque de los pods de payment que arrancan dentro de la ventana
     SELECT
         addMilliseconds(toDateTime64(p.started_at, 9, 'UTC'), toUInt32(step.1))                      AS t,
         p.deployment, map('service.name', p.deployment, 'service.version', p.version, 'k8s.cluster.name', 'payflow-prod-eu',
@@ -425,7 +448,7 @@ FROM
         (6100, 'com.zaxxer.hikari.HikariDataSource : HikariPool-1 - Start completed.'),
         (7900, 'c.p.payment.PaymentApplication : Started PaymentApplication in 7.9 seconds (process running for 8.6)')] AS step
     WHERE p.deployment = 'payment'
-      AND p.started_at >= addSeconds(day0, {from_s:UInt32}) AND p.started_at < addSeconds(day0, {to_s:UInt32})
+      AND p.started_at >= {from_t:DateTime} AND p.started_at < {to_t:DateTime}
 
     UNION ALL
 
@@ -439,13 +462,13 @@ FROM
         e.2
     FROM payflow_inventory.pod AS p
     ARRAY JOIN [
-        (toDateTime('2026-11-27 14:18:40', 'UTC'), 'WARNING:fraud.scorer:request queue depth 412, scoring slower than arrival rate'),
-        (toDateTime('2026-11-27 14:20:15', 'UTC'), 'WARNING:fraud.model:feature cache 1.9 GiB, close to the container memory limit (2 GiB)'),
-        (toDateTime('2026-11-27 14:21:07', 'UTC'), 'CRITICAL:gunicorn.error:WORKER TIMEOUT (pid:4211)'),
-        (toDateTime('2026-11-27 14:21:52', 'UTC'), 'INFO:gunicorn.error:Booting worker with pid: 77'),
-        (toDateTime('2026-11-27 14:21:58', 'UTC'), 'INFO:fraud.model:model fraud-gbm-2026-11 loaded in 5.8 s')] AS e
-    WHERE p.deployment = 'fraud-scoring' AND p.slot = 2
-      AND e.1 >= addSeconds(day0, {from_s:UInt32}) AND e.1 < addSeconds(day0, {to_s:UInt32})
+        (pf_at('14:18:40'), 'WARNING:fraud.scorer:request queue depth 412, scoring slower than arrival rate'),
+        (pf_at('14:20:15'), 'WARNING:fraud.model:feature cache 1.9 GiB, close to the container memory limit (2 GiB)'),
+        (pf_at('14:21:07'), 'CRITICAL:gunicorn.error:WORKER TIMEOUT (pid:4211)'),
+        (pf_at('14:21:52'), 'INFO:gunicorn.error:Booting worker with pid: 77'),
+        (pf_at('14:21:58'), 'INFO:fraud.model:model fraud-gbm-2.9.1 loaded in 5.8 s')] AS e
+    WHERE p.deployment = 'fraud-scoring' AND p.slot = 2 AND e.1 >= p.started_at AND e.1 < p.stopped_at
+      AND e.1 >= {from_t:DateTime} AND e.1 < {to_t:DateTime}
 );
 
 
@@ -453,34 +476,35 @@ FROM
 --  El propio clúster habla: rollouts, scheduling, probes, presión de memoria, OOM kills.
 --  Vienen de la API de Kubernetes, con su propio formato JSON.
 CREATE OR REPLACE VIEW payflow_sim.k8s_events AS
-WITH toDateTime64('2026-11-27 00:00:00', 9, 'UTC') AS day0
 SELECT t, kind_obj, ns, obj, type, reason, message, component, host
 FROM
 (
-    -- rollout y rollback de payment: se mata el pod viejo, se planifica y arranca el nuevo
+    -- cada rollout del mes: se mata el pod viejo, se planifica y arranca el nuevo
     SELECT toDateTime64(p.started_at, 9, 'UTC') + toIntervalMillisecond(ev.1) AS t, 'Pod' AS kind_obj, p.namespace AS ns, p.pod_name AS obj,
            'Normal' AS type, ev.2 AS reason, ev.3 AS message, ev.4 AS component, p.node_name AS host
     FROM payflow_inventory.pod AS p
     ARRAY JOIN [
-        (0,    'Scheduled', concat('Successfully assigned payments/', p.pod_name, ' to ', p.node_name), 'default-scheduler'),
-        (600,  'Pulled',    concat('Container image "registry.payflow.internal/payment:', p.version, '" already present on machine'), 'kubelet'),
-        (900,  'Created',   'Created container: payment', 'kubelet'),
-        (1100, 'Started',   'Started container payment', 'kubelet')] AS ev
-    WHERE p.deployment = 'payment' AND p.started_at > toDateTime('2026-11-27 00:00:00', 'UTC')
+        (0,    'Scheduled', concat('Successfully assigned ', p.namespace, '/', p.pod_name, ' to ', p.node_name), 'default-scheduler'),
+        (600,  'Pulled',    concat('Container image "registry.payflow.internal/', p.deployment, ':', p.version, '" already present on machine'), 'kubelet'),
+        (900,  'Created',   concat('Created container: ', p.deployment), 'kubelet'),
+        (1100, 'Started',   concat('Started container ', p.deployment), 'kubelet')] AS ev
+    WHERE p.started_at > pf_day(-45) + INTERVAL 9 HOUR
 
     UNION ALL
 
     SELECT toDateTime64(p.stopped_at, 9, 'UTC') + toIntervalMillisecond(500), 'Pod', p.namespace, p.pod_name, 'Normal', 'Killing',
-           'Stopping container payment', 'kubelet', p.node_name
+           concat('Stopping container ', p.deployment), 'kubelet', p.node_name
     FROM payflow_inventory.pod AS p
-    WHERE p.deployment = 'payment' AND p.stopped_at < toDateTime('2099-01-01', 'UTC')
+    WHERE p.stopped_at < toDateTime('2099-01-01', 'UTC')
 
     UNION ALL
 
-    SELECT toDateTime64(h.valid_from, 9, 'UTC'), 'Deployment', 'payments', 'payment', 'Normal', 'ScalingReplicaSet',
-           concat('Scaled up replica set payment-', h.replicaset, ' to 6 (rolling update ', h.change_id, ')'), 'deployment-controller', ''
+    SELECT toDateTime64(h.valid_from, 9, 'UTC'), 'Deployment', s.namespace, h.deployment, 'Normal', 'ScalingReplicaSet',
+           concat('Scaled up replica set ', h.deployment, '-', h.replicaset, ' to ', toString(s.replicas), ' (rolling update ', h.change_id, ')'),
+           'deployment-controller', ''
     FROM payflow_inventory.deployment_history AS h
-    WHERE h.deployment = 'payment' AND h.valid_from > toDateTime('2026-11-27 00:00:00', 'UTC')
+    INNER JOIN payflow_inventory.service AS s ON s.service = h.deployment
+    WHERE h.valid_from > pf_day(-45) + INTERVAL 9 HOUR
 
     UNION ALL
 
@@ -499,17 +523,19 @@ FROM
     FROM
     (
         SELECT arrayJoin([
-            (toDateTime('2026-11-27 14:19:31', 'UTC'), 'Node', '', 'ip-10-0-3-17', 'NodeHasInsufficientMemory',
+            (pf_at('14:19:31'), 'Node', '', 'ip-10-0-3-17', 'NodeHasInsufficientMemory',
              'Node ip-10-0-3-17 status is now: NodeHasInsufficientMemory', 'kubelet'),
-            (toDateTime('2026-11-27 14:21:07', 'UTC'), 'Node', '', 'ip-10-0-3-17', 'OOMKilling',
+            (pf_at('14:21:07'), 'Node', '', 'ip-10-0-3-17', 'OOMKilling',
              'Memory cgroup out of memory: Killed process 4211 (gunicorn) total-vm:2541604kB, anon-rss:2096128kB', 'kernel-monitor'),
-            (toDateTime('2026-11-27 14:21:08', 'UTC'), 'Pod', 'risk', (SELECT pod_name FROM payflow_inventory.pod WHERE deployment = 'fraud-scoring' AND slot = 2), 'BackOff',
+            (pf_at('14:21:08'), 'Pod', 'risk',
+             (SELECT any(pod_name) FROM payflow_inventory.pod WHERE deployment = 'fraud-scoring' AND slot = 2
+                AND pf_at('14:21:08') BETWEEN started_at AND stopped_at), 'BackOff',
              'Back-off restarting failed container fraud-scoring (OOMKilled, exit code 137)', 'kubelet'),
-            (toDateTime('2026-11-27 14:23:40', 'UTC'), 'Node', '', 'ip-10-0-3-17', 'NodeHasSufficientMemory',
+            (pf_at('14:23:40'), 'Node', '', 'ip-10-0-3-17', 'NodeHasSufficientMemory',
              'Node ip-10-0-3-17 status is now: NodeHasSufficientMemory', 'kubelet')]) AS e
     )
 )
-WHERE t >= addSeconds(day0, {from_s:UInt32}) AND t < addSeconds(day0, {to_s:UInt32});
+WHERE t >= {from_t:DateTime} AND t < {to_t:DateTime};
 
 
 -- PASO 9 · Lo que envían los agentes de los nodos
@@ -533,9 +559,9 @@ FROM
              'Tuple(time String, stream String, log String, `log.file.path` String)'))           AS payload
     FROM
     (
-        SELECT t, svc, res, line FROM payflow_sim.app_log_lines(from_s = {from_s:UInt32}, to_s = {to_s:UInt32})
+        SELECT t, svc, res, line FROM payflow_sim.app_log_lines(from_t = {from_t:DateTime}, to_t = {to_t:DateTime})
         UNION ALL
-        SELECT t, svc, res, line FROM payflow_sim.infra_log_lines(from_s = {from_s:UInt32}, to_s = {to_s:UInt32})
+        SELECT t, svc, res, line FROM payflow_sim.infra_log_lines(from_t = {from_t:DateTime}, to_t = {to_t:DateTime})
     ) AS l
 
     UNION ALL
@@ -545,13 +571,13 @@ FROM
         'k8sobjects',
         toJSONString(CAST(('Event', e.type, e.reason, e.message, (e.kind_obj, e.ns, e.obj), (e.component, e.host), pf_ts_iso(e.t), 1),
              'Tuple(kind String, type String, reason String, message String, involvedObject Tuple(kind String, namespace String, name String), source Tuple(component String, host String), firstTimestamp String, count UInt32)'))
-    FROM payflow_sim.k8s_events(from_s = {from_s:UInt32}, to_s = {to_s:UInt32}) AS e
+    FROM payflow_sim.k8s_events(from_t = {from_t:DateTime}, to_t = {to_t:DateTime}) AS e
 );
 
 SELECT source, count() AS records, formatReadableSize(sum(length(payload))) AS json
-FROM payflow_sim.raw_records(from_s = 50400, to_s = 54000)   -- de 14:00 a 15:00
+FROM payflow_sim.raw_records(from_t = pf_at('14:00'), to_t = pf_at('15:00'))   -- Black Friday, de 14:00 a 15:00
 GROUP BY source;
--- Medido: 2,86 s · 3 947 filas leídas (46,3 KB) · 832,2 MB de memoria
+-- Medido: 2,98 s · 4 145 filas leídas (56 KB) · 825,4 MB de memoria
 -- Qué observar: una hora del incidente, unas 530 000 líneas de log de contenedores
 -- (unos 200 MB de JSON) y unos cientos de eventos de Kubernetes.
 
@@ -561,29 +587,29 @@ GROUP BY source;
 SELECT
     JSONExtractString(payload, 'log.file.path')     AS file,
     JSONExtractString(payload, 'log')               AS line
-FROM payflow_sim.raw_records(from_s = 51000, to_s = 51001)
+FROM payflow_sim.raw_records(from_t = pf_at('14:10:00'), to_t = pf_at('14:10:01'))
 WHERE source = 'filelog'
 LIMIT 5;
--- Medido: 847 ms · 198 filas leídas (8,3 KB)
+-- Medido: 632 ms · 299 filas leídas (13,1 KB) · 59,6 MB de memoria
 
 --  Cuatro servicios, cuatro formatos: texto nginx, JSON de Go, logback de Java, logging de Python
 SELECT
     splitByChar('/', JSONExtractString(payload, 'log.file.path'))[6]   AS container,
     any(JSONExtractString(payload, 'log'))                              AS example
-FROM payflow_sim.raw_records(from_s = 51000, to_s = 51010)
+FROM payflow_sim.raw_records(from_t = pf_at('14:10:00'), to_t = pf_at('14:10:10'))
 WHERE source = 'filelog' AND payload NOT LIKE '%health%'
 GROUP BY container
 ORDER BY container;
--- Medido: 555 ms · 207 filas leídas (8,3 KB)
+-- Medido: 663 ms · 308 filas leídas (13,2 KB) · 59,9 MB de memoria
 -- Qué observar: el nivel de error se escribe "error", " ERROR ", "ERROR:" o solo como
 -- un código HTTP. La pasarela lo normalizará una vez, para todas las líneas.
 
 --  El tipo JSON: se navega con puntos. Un path es de tipo Dynamic: castéalo para agrupar.
 SELECT j.involvedObject.kind::String AS object_kind, j.reason::String AS reason, count() AS events
-FROM (SELECT payload::JSON AS j FROM payflow_sim.raw_records(from_s = 50400, to_s = 54000) WHERE source = 'k8sobjects')
+FROM (SELECT payload::JSON AS j FROM payflow_sim.raw_records(from_t = pf_at('14:00'), to_t = pf_at('15:00')) WHERE source = 'k8sobjects')
 GROUP BY object_kind, reason
 ORDER BY events DESC;
--- Medido: 568 ms · 3 800 filas leídas (36,6 KB)
+-- Medido: 640 ms · 3 923 filas leídas (41,6 KB)
 
 
 -- PASO 11 · Un problema de seguridad, antes de guardar nada
@@ -592,10 +618,10 @@ SELECT
     splitByChar('_', splitByChar('/', JSONExtractString(payload, 'log.file.path'))[5])[2]  AS pod,
     count()                                                                                AS lines_with_pan,
     any(extract(JSONExtractString(payload, 'log'), 'pan=[0-9]+'))                          AS example
-FROM payflow_sim.raw_records(from_s = 50400, to_s = 54000)
+FROM payflow_sim.raw_records(from_t = pf_at('14:00'), to_t = pf_at('15:00'))
 WHERE source = 'filelog' AND match(payload, 'pan=[0-9]{13,19}')
 GROUP BY pod;
--- Medido: 3,03 s · 3 797 filas leídas (39,4 KB) · 830,9 MB de memoria
+-- Medido: 3,28 s · 3 898 filas leídas (45,5 KB) · 869 MB de memoria
 -- Qué observar: un solo pod, olvidado en DEBUG, imprime números de tarjeta completos. El
 -- procesador redaction del colector debería enmascararlos en origen; la pasarela del
 -- fichero 02 los vuelve a enmascarar y su tabla de aterrizaje no guarda nada: ningún
@@ -604,7 +630,8 @@ GROUP BY pod;
 
 -- PASO 12 · Checkpoint
 SELECT
-    if((SELECT count() FROM payflow_sim.requests(from_s = 0, to_s = 86400)) > 1300000, 'OK', 'KO') AS one_day_of_requests,
-    if((SELECT count() FROM payflow_sim.raw_records(from_s = 51667, to_s = 51668) WHERE source = 'k8sobjects') >= 1, 'OK', 'KO') AS oom_event
+    if((SELECT count() FROM payflow_sim.requests(from_t = pf_day(0), to_t = pf_day(1))) > 1300000, 'OK', 'KO')               AS black_friday_requests,
+    if((SELECT count() FROM payflow_sim.requests(from_t = pf_day(-1), to_t = pf_day(0))) BETWEEN 80000 AND 150000, 'OK', 'KO') AS ordinary_day_requests,
+    if((SELECT count() FROM payflow_sim.raw_records(from_t = pf_at('14:21:07'), to_t = pf_at('14:21:08')) WHERE source = 'k8sobjects') >= 1, 'OK', 'KO') AS oom_event
 SETTINGS select_sequential_consistency = 1;
--- Medido: 523 ms · 86 602 filas leídas (681 KB)
+-- Medido: 768 ms · 173 125 filas leídas (1,3 MB)

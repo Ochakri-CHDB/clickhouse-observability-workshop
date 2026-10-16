@@ -17,20 +17,20 @@
 --  Dans ClickStack : ServiceName:payment SeverityText:ERROR "HikariPool"
 SELECT Timestamp, ServiceName, SeverityText, Body
 FROM payflow_otel.otel_logs
-WHERE Timestamp BETWEEN '2026-11-27 14:05:00' AND '2026-11-27 14:15:00'
+WHERE Timestamp BETWEEN pf_at('14:05') AND pf_at('14:15')
   AND ServiceName = 'payment' AND SeverityText = 'ERROR'
   AND hasAllTokens(lower(Body), ['hikaripool'])
 ORDER BY Timestamp DESC
 LIMIT 5;
--- Mesuré : 24 ms · 172 032 lignes lues (2,9 Mo)
+-- Mesuré : 741 ms · 172 033 lignes lues (2,9 Mo)
 
 --  Quels index a-t-elle utilisés ? Parts et granules sautés à chaque étape.
 EXPLAIN indexes = 1
 SELECT count()
 FROM payflow_otel.otel_logs
-WHERE Timestamp BETWEEN '2026-11-27 14:05:00' AND '2026-11-27 14:15:00'
+WHERE Timestamp BETWEEN pf_at('14:05') AND pf_at('14:15')
   AND hasAllTokens(lower(Body), ['hikaripool']);
--- Mesuré : 4 ms · 32 lignes lues (1,3 Ko)
+-- Mesuré : 8 ms · 33 lignes lues (1,3 Ko)
 -- À observer : la partition garde un jour, la clé primaire dix minutes, puis
 -- idx_lower_body ne garde que les granules qui contiennent le mot.
 
@@ -41,12 +41,12 @@ WHERE Timestamp BETWEEN '2026-11-27 14:05:00' AND '2026-11-27 14:15:00'
 --  la map.
 SELECT ResourceAttributes['k8s.pod.name'] AS pod, count() AS errors
 FROM payflow_otel.otel_logs
-WHERE Timestamp BETWEEN '2026-11-27 14:00:00' AND '2026-11-27 14:45:00'
+WHERE Timestamp BETWEEN pf_at('14:00') AND pf_at('14:45')
   AND has(ResourceAttributeItems, 'service.version=v2.4.1')
   AND SeverityText = 'ERROR'
 GROUP BY pod
 ORDER BY errors DESC;
--- Mesuré : 21 ms · 163 840 lignes lues (39,1 Mo)
+-- Mesuré : 509 ms · 163 841 lignes lues (39,1 Mo)
 
 --  Les colonnes matérialisées : l'exporteur promeut les attributs les plus utilisés
 SELECT name, type, default_expression
@@ -58,23 +58,23 @@ WHERE database = 'payflow_otel' AND table = 'otel_logs' AND default_kind = 'MATE
 -- ÉTAPE 3 · Corrélation : d'une ligne de log à sa trace, puis aux métriques du pod
 WITH (SELECT any(TraceId) FROM payflow_otel.otel_logs
       WHERE ServiceName = 'checkout' AND SeverityText = 'ERROR'
-        AND Timestamp BETWEEN '2026-11-27 14:10:00' AND '2026-11-27 14:10:05') AS tid
+        AND Timestamp BETWEEN pf_at('14:10') AND pf_at('14:10:05')) AS tid
 SELECT ServiceName, SpanName, round(Duration / 1e6, 1) AS ms, StatusCode, ResourceAttributes['k8s.pod.name'] AS pod
 FROM payflow_otel.otel_traces
-WHERE TraceId = tid AND Timestamp BETWEEN '2026-11-27 14:09:55' AND '2026-11-27 14:10:15'
+WHERE TraceId = tid AND Timestamp BETWEEN pf_at('14:09:55') AND pf_at('14:10:15')
 ORDER BY Timestamp;
--- Mesuré : 520 ms · 3 M lignes lues (18,3 Mo) · 146,4 Mo de mémoire
+-- Mesuré : 1,87 s · 3,3 M lignes lues (19,4 Mo) · 132,3 Mo de mémoire
 -- À observer : la trace du paiement en échec. Dans ClickStack, un clic sur la ligne de log
 -- ouvre ce waterfall, et l'onglet Infrastructure montre les métriques du pod.
 
 SELECT toStartOfMinute(toDateTime(TimeUnix)) AS minute, MetricName, round(avg(Value), 2) AS value
 FROM payflow_otel.otel_metrics_gauge
-WHERE ResourceAttributes['k8s.pod.name'] = 'payment-5c8b7f9d21-dbec8'
+WHERE ResourceAttributes['k8s.pod.name'] = 'payment-5c8b7f9d21-50d24'
   AND MetricName IN ('k8s.pod.cpu.utilization', 'hikaricp.connections.pending')
-  AND TimeUnix BETWEEN '2026-11-27 14:05:00' AND '2026-11-27 14:10:00'
+  AND TimeUnix BETWEEN pf_at('14:05') AND pf_at('14:10')
 GROUP BY minute, MetricName
 ORDER BY minute, MetricName;
--- Mesuré : 193 ms · 32 768 lignes lues (1,6 Mo)
+-- Mesuré : 23 ms · 24 577 lignes lues (1,7 Mo)
 -- À observer : le pod ne travaille pas (CPU bas), il attend (des dizaines de connexions
 -- en file).
 
@@ -85,13 +85,13 @@ FROM payflow_otel.otel_logs
 WHERE Timestamp BETWEEN now() - INTERVAL 2 MINUTE AND now()
 ORDER BY Timestamp DESC
 LIMIT 10;
--- Mesuré : 5 ms · 6 536 lignes lues (262,3 Ko)
+-- Mesuré : 8 ms · 137 436 lignes lues (1,4 Mo)
 
 
 -- ÉTAPE 5 · Checkpoint
 SELECT
-    if((SELECT count() FROM payflow_otel.otel_logs WHERE Timestamp BETWEEN '2026-11-27 14:05:00' AND '2026-11-27 14:15:00'
+    if((SELECT count() FROM payflow_otel.otel_logs WHERE Timestamp BETWEEN pf_at('14:05') AND pf_at('14:15')
         AND hasAllTokens(lower(Body), ['hikaripool'])) > 1000, 'OK', 'KO')                                   AS full_text_search,
     if((SELECT count() FROM payflow_otel.otel_logs WHERE Timestamp BETWEEN now() - INTERVAL 5 MINUTE AND now()) > 0, 'OK', 'KO') AS live_tail
 SETTINGS select_sequential_consistency = 1;
--- Mesuré : 22 ms · 167 109 lignes lues (1,4 Mo)
+-- Mesuré : 84 ms · 295 287 lignes lues (2,4 Mo)

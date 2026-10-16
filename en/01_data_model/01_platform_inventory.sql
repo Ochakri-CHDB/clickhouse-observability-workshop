@@ -15,6 +15,11 @@
 --
 --  A ClickHouse "database" is only a namespace: it costs nothing and is used
 --  to organise tables and to grant rights (module 8).
+--
+--  The workshop has no fixed date. Its data always covers the last month, up to
+--  today, and Black Friday is the last Friday before the day you run it. Step 2
+--  stores that calendar once; every query of the workshop reads it through three
+--  small functions: pf_black_friday(), pf_day(n) and pf_at('14:05').
 -- =====================================================================
 
 
@@ -26,7 +31,45 @@ CREATE DATABASE IF NOT EXISTS payflow_sre;
 CREATE DATABASE IF NOT EXISTS payflow_sim;
 
 
--- STEP 2 · A technical user for the dictionaries (step 8)
+-- STEP 2 · The calendar: a month of history that always ends today
+--  Black Friday is the last Friday strictly before today (a week ago if today is a
+--  Friday). The simulated history covers the 30 days that end with it; module 2
+--  then replays last week's traffic up to now. The calendar is written once: if the
+--  workshop runs past midnight, every query still points to the same Black Friday.
+CREATE OR REPLACE TABLE payflow_sim.calendar
+(
+    loaded_at      DateTime('UTC'),
+    workshop_day   Date,
+    black_friday   Date,
+    history_start  Date
+)
+ENGINE = MergeTree
+ORDER BY loaded_at;
+
+INSERT INTO payflow_sim.calendar
+SELECT now(), today(), today() - 1 - ((toDayOfWeek(today() - 1) + 2) % 7) AS black_friday, black_friday - 29;
+-- Measured: 132 ms · 1 row read · 1 row written
+
+--  pf_black_friday(): the date. pf_day(n): midnight UTC, n days after Black Friday
+--  (pf_day(-7) is the Friday before). pf_at('14:05'): a time of the Black Friday day.
+--  The scalar subquery is computed once per query: ClickHouse sees a constant, and
+--  the primary key and partitions still skip what is outside the range.
+CREATE OR REPLACE FUNCTION pf_black_friday AS () -> assumeNotNull((SELECT argMax(black_friday, loaded_at) FROM payflow_sim.calendar));
+CREATE OR REPLACE FUNCTION pf_day AS (n) -> toDateTime(pf_black_friday() + n, 'UTC');
+CREATE OR REPLACE FUNCTION pf_at AS (hms) -> parseDateTimeBestEffort(concat(toString(pf_black_friday()), ' ', hms), 'UTC');
+
+SELECT
+    today()                        AS workshop_day,
+    pf_black_friday()              AS black_friday,
+    toDayOfWeek(pf_black_friday()) AS day_of_week,   -- 5 = Friday
+    pf_day(-29)                    AS history_start,
+    pf_at('13:58')                 AS faulty_release;
+-- Measured: 4 ms · 2 rows read
+-- What to look for: write down the Black Friday date. In ClickStack you will type the
+-- incident range by hand: that date, from 13:45 to 15:00 UTC.
+
+
+-- STEP 3 · A technical user for the dictionaries (step 9)
 --  In the Cloud console, a dictionary that reads a local table must
 --  declare a user and a password. We keep it minimal: local connection
 --  only, read-only on the inventory and the simulator.
@@ -35,7 +78,7 @@ GRANT SELECT ON payflow_inventory.* TO payflow_dict;
 GRANT SELECT ON payflow_sim.* TO payflow_dict;
 
 
--- STEP 3 · The nodes of the cluster: our first MergeTree table
+-- STEP 4 · The nodes of the cluster: our first MergeTree table
 --  MergeTree is the core ClickHouse engine. Two things to remember:
 --    · ORDER BY sets the physical order of rows on disk AND the primary
 --      index. Choose it from the most frequent filters
@@ -70,7 +113,7 @@ INSERT INTO payflow_inventory.node VALUES
     ('ip-10-0-3-18', 'eu-west-1c', 'r7i.2xlarge', 8, 64);
 
 
--- STEP 4 · The services and their owners
+-- STEP 5 · The services and their owners
 --  9 services in 3 namespaces. slo_target is the availability objective
 --  of the service (99.9% = 43 minutes of errors allowed per month).
 CREATE OR REPLACE TABLE payflow_inventory.service
@@ -98,10 +141,11 @@ INSERT INTO payflow_inventory.service VALUES
     ('notification',         'payments', 'checkout', 'go',     3, 'standard', 99.0);
 
 
--- STEP 5 · The deployment history: which version ran when
---  Every rollout creates a new ReplicaSet, hence new pod names.
---  On Black Friday at 13:58 UTC the payments team ships payment v2.4.1.
---  It is rolled back at 14:42. Keep these two times in mind for module 6.
+-- STEP 6 · The deployment history: which version ran when
+--  Every rollout creates a new ReplicaSet, hence new pod names. Over the month the
+--  teams ship their weekly releases; on Black Friday at 13:58 UTC the payments team
+--  ships payment v2.4.1. It is rolled back at 14:42. Keep these two times in mind
+--  for module 6. Dates are relative to Black Friday: pf_day(-10) is ten days before.
 CREATE OR REPLACE TABLE payflow_inventory.deployment_history
 (
     deployment   LowCardinality(String),
@@ -117,44 +161,64 @@ ENGINE = MergeTree
 ORDER BY (deployment, valid_from);
 
 INSERT INTO payflow_inventory.deployment_history
+WITH changes AS
+(
+    -- the version of every service six weeks ago, then the changes of the month
+    SELECT service AS deployment,
+           ['3.8.1', '1.12.0', '5.1.3', '2.9.0', '1.3.7', '2.3.9', '4.2.0', '3.0.5', '1.7.2'][indexOf(
+           ['api-gateway', 'auth', 'checkout', 'fraud-scoring', 'currency', 'payment', 'card-network-adapter', 'ledger', 'notification'], service)] AS v,
+           pf_day(-45) + INTERVAL 9 HOUR                           AS t,
+           concat('CHG-', toString(3990 + rowNumberInAllBlocks())) AS change_id,
+           'release-bot'                                           AS author,
+           'weekly release'                                        AS note
+    FROM payflow_inventory.service
+    UNION ALL
+    SELECT c.1, c.2, c.3, c.4, c.5, c.6
+    FROM
+    (
+        SELECT arrayJoin([
+            ('api-gateway',   '3.8.2', pf_day(-24) + INTERVAL 10 HOUR,                      'CHG-4061', 'release-bot',     'weekly release'),
+            ('checkout',      '5.1.4', pf_day(-17) + INTERVAL 10 HOUR,                      'CHG-4078', 'release-bot',     'weekly release'),
+            ('payment',       '2.4.0', pf_day(-10) + INTERVAL 10 HOUR + INTERVAL 15 MINUTE, 'CHG-4090', 'release-bot',     'weekly release'),
+            ('fraud-scoring', '2.9.1', pf_day(-9) + INTERVAL 11 HOUR,                       'CHG-4093', 'release-bot',     'model refresh'),
+            ('notification',  '1.7.3', pf_day(-3) + INTERVAL 14 HOUR,                       'CHG-4109', 'release-bot',     'weekly release'),
+            ('payment',       '2.4.1', pf_at('13:58:00'),                                   'CHG-4117', 'j.martin',        'connection pool tuning for Black Friday (pool size 50 to 10, see review)'),
+            ('payment',       '2.4.0', pf_at('14:42:00'),                                   'CHG-4118', 'oncall-payments', 'rollback of CHG-4117')]) AS c
+    )
+)
 SELECT
-    s.service,
-    concat('v', s.base_version),
-    substring(lower(hex(cityHash64(s.service, s.base_version))), 1, 10),   -- 10 characters, like Kubernetes
-    toDateTime('2026-11-20 09:00:00', 'UTC'),
-    toDateTime('2099-12-31 00:00:00', 'UTC'),
-    concat('CHG-', toString(4000 + rowNumberInAllBlocks())),
-    'release-bot',
-    'weekly release'
+    deployment,
+    concat('v', v),
+    -- the payment ReplicaSets keep fixed names: you will meet them in every module
+    multiIf(deployment = 'payment' AND v = '2.4.1', '5c8b7f9d21', deployment = 'payment' AND v = '2.4.0', '7d9f8c6b54',
+            substring(lower(hex(cityHash64(deployment, v))), 1, 10)),
+    t,
+    -- valid until the next change of the same deployment
+    if(next_t > t, next_t - INTERVAL 1 SECOND, toDateTime('2099-12-31 00:00:00', 'UTC')),
+    change_id,
+    author,
+    note
 FROM
 (
-    SELECT service,
-           ['3.8.2', '1.12.0', '5.1.4', '2.9.1', '1.3.7', '2.4.0', '4.2.0', '3.0.5', '1.7.3'][indexOf(
-           ['api-gateway', 'auth', 'checkout', 'fraud-scoring', 'currency', 'payment', 'card-network-adapter', 'ledger', 'notification'], service)] AS base_version
-    FROM payflow_inventory.service
-    WHERE service != 'payment'
-) AS s;
--- Measured: 85 ms · 9 rows read · 8 rows written
+    SELECT *, leadInFrame(t) OVER (PARTITION BY deployment ORDER BY t ROWS BETWEEN CURRENT ROW AND 1 FOLLOWING) AS next_t
+    FROM changes
+);
+-- Measured: 102 ms · 11 rows read · 16 rows written
 
-INSERT INTO payflow_inventory.deployment_history VALUES
-    ('payment', 'v2.4.0', '7d9f8c6b54', '2026-11-20 09:00:00', '2026-11-27 13:57:59', 'CHG-4005', 'release-bot', 'weekly release'),
-    ('payment', 'v2.4.1', '5c8b7f9d21', '2026-11-27 13:58:00', '2026-11-27 14:41:59', 'CHG-4117', 'j.martin',    'connection pool tuning for Black Friday (pool size 50 to 10, see review)'),
-    ('payment', 'v2.4.0', '7d9f8c6b54', '2026-11-27 14:42:00', '2099-12-31 00:00:00', 'CHG-4118', 'oncall-payments', 'rollback of CHG-4117');
-
-SELECT deployment, version, replicaset, valid_from, valid_to, change_id, note
+SELECT deployment, version, change_id, valid_from, valid_to, note
 FROM payflow_inventory.deployment_history
-WHERE deployment = 'payment'
+WHERE valid_from >= pf_day(-29)
 ORDER BY valid_from;
--- Measured: 2 ms
--- What to look for: three rows for payment. The middle one is the version
--- that will cause the incident. The note already gives a clue.
+-- Measured: 5 ms · 17 rows read (1 KB)
+-- What to look for: five ordinary releases during the month, then two changes on Black
+-- Friday. The note of CHG-4117 already gives a clue.
 
 
--- STEP 6 · The pods
+-- STEP 7 · The pods
 --  A pod name is "<deployment>-<replicaset>-<5 characters>". Each slot of a
 --  deployment keeps its pod until a rollout replaces it. During a rollout,
---  Kubernetes replaces pods one by one: here one every 30 s on the way in
---  (13:58) and one every 20 s on the way back (14:42).
+--  Kubernetes replaces pods one by one: here one every 30 s, and one every 20 s
+--  for a rollback (14:42 on Black Friday).
 --  The pods are spread over the 12 nodes. fraud-scoring slot 2 lands on
 --  ip-10-0-3-17, the smallest node.
 CREATE OR REPLACE TABLE payflow_inventory.pod
@@ -178,13 +242,16 @@ WITH
      'ip-10-0-2-23', 'ip-10-0-2-24', 'ip-10-0-3-15', 'ip-10-0-3-16', 'ip-10-0-3-17', 'ip-10-0-3-18'] AS nodes,
     generations AS
     (
-        -- one generation per (deployment, version period); payment has 3, the others 1
+        -- one generation per (deployment, version period); payment has 4
         SELECT
             h.deployment, h.version, h.replicaset, h.valid_from, h.valid_to,
-            row_number() OVER (PARTITION BY h.deployment ORDER BY h.valid_from) - 1 AS gen,
+            row_number() OVER w - 1                                         AS gen,
+            if(h.note LIKE 'rollback%', 20, 30)                             AS spacing,
+            if(leadInFrame(h.note) OVER w LIKE 'rollback%', 20, 30)         AS next_spacing,
             s.namespace, s.replicas
         FROM payflow_inventory.deployment_history AS h
         INNER JOIN payflow_inventory.service AS s ON s.service = h.deployment
+        WINDOW w AS (PARTITION BY h.deployment ORDER BY h.valid_from ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)
     )
 SELECT
     concat(g.deployment, '-', g.replicaset, '-',
@@ -196,32 +263,31 @@ SELECT
     g.version,
     if(g.deployment = 'fraud-scoring' AND slot = 2, 'ip-10-0-3-17',
        nodes[1 + cityHash64(g.deployment, slot, 'node') % 12])                            AS node_name,
-    -- rollout: slot k of a new generation starts k x 30 s (or 20 s for the rollback) after the change
-    if(g.gen = 0, g.valid_from,
-       g.valid_from + toIntervalSecond(slot * if(g.gen = 1, 30, 20)))                       AS started_at,
+    -- rollout: slot k of a new generation starts k x 30 s (or 20 s for a rollback) after the change
+    if(g.gen = 0, g.valid_from, g.valid_from + toIntervalSecond(slot * g.spacing))         AS started_at,
     if(g.valid_to >= toDateTime('2099-01-01', 'UTC'), g.valid_to,
-       g.valid_to + 1 + toIntervalSecond(slot * if(g.gen = 0, 30, 20)) - 1)                 AS stopped_at
+       g.valid_to + toIntervalSecond(slot * g.next_spacing))                               AS stopped_at
 FROM generations AS g
 ARRAY JOIN range(toUInt8(g.replicas)) AS slot;
--- Measured: 76 ms · 20 rows read · 49 rows written
+-- Measured: 87 ms · 25 rows read (1.3 KB) · 74 rows written
 
 SELECT deployment, count() AS pods, uniqExact(node_name) AS nodes
 FROM payflow_inventory.pod
 GROUP BY deployment
 ORDER BY deployment;
--- Measured: 3 ms · 49 rows read
--- What to look for: one pod per replica, 49 in total. payment has 18: 3 generations of 6.
+-- Measured: 3 ms · 74 rows read
+-- What to look for: 74 pods over the month. payment has 24: 4 generations of 6.
 
 SELECT pod_name, version, node_name, started_at, stopped_at
 FROM payflow_inventory.pod
 WHERE deployment = 'payment' AND slot = 0
 ORDER BY started_at;
--- Measured: 3 ms · 49 rows read (2.5 KB)
--- What to look for: the pod of slot 0 changes name twice. A log line only
+-- Measured: 3 ms · 74 rows read (3.5 KB)
+-- What to look for: the pod of slot 0 changes name three times. A log line only
 -- carries the pod name: without this table, nobody knows which version wrote it.
 
 
--- STEP 7 · The merchants
+-- STEP 8 · The merchants
 --  PayFlow processes payments for 20,000 merchants. Each span of a payment
 --  carries the merchant id: this is what links observability to business
 --  (module 6: how much revenue did the incident cost, and to whom).
@@ -254,7 +320,7 @@ SELECT
     multiIf(cityHash64(number, 'tier') % 100 < 2, 'enterprise', cityHash64(number, 'tier') % 100 < 20, 'mid-market', 'small') AS tier,
     toFloat32(round(15 + (cityHash64(number, 'basket') % 1000) / 10.0 * if(category = 'Travel', 6, 1), 2))       AS avg_basket
 FROM numbers(20000);
--- Measured: 91 ms · 20,000 rows read (156.2 KB) · 20,000 rows written
+-- Measured: 84 ms · 20,000 rows read (156.2 KB) · 20,000 rows written
 
 SELECT tier, count() AS merchants, round(avg(avg_basket), 1) AS avg_basket_eur
 FROM payflow_inventory.merchant
@@ -263,7 +329,7 @@ ORDER BY merchants;
 -- Measured: 3 ms · 20,000 rows read (97.7 KB)
 
 
--- STEP 8 · The catalog in memory: dictionaries
+-- STEP 9 · The catalog in memory: dictionaries
 --  The collector enriches every record with Kubernetes metadata (the k8sattributes
 --  processor asks the Kubernetes API). Here the gateway of module 2 does it in SQL:
 --  a dictionary is a reference table loaded in memory, read with dictGet() at the
@@ -341,23 +407,24 @@ RANGE(MIN valid_from MAX valid_to)
 LIFETIME(MIN 300 MAX 600);
 
 SELECT
-    dictGet('payflow_inventory.dict_pod', ('deployment', 'version', 'node_name'), 'payment-5c8b7f9d21-dbec8')        AS pod_metadata,
+    dictGet('payflow_inventory.dict_pod', ('deployment', 'version', 'node_name'), 'payment-5c8b7f9d21-50d24')        AS pod_metadata,
     dictGet('payflow_inventory.dict_node', 'zone', 'ip-10-0-3-17')                                                    AS zone,
     dictGet('payflow_inventory.dict_service', 'team', 'payment')                                                      AS team,
-    dictGet('payflow_inventory.dict_deployment', 'change_id', 'payment', toDateTime('2026-11-27 14:15:00', 'UTC'))   AS change_at_14h15;
--- Measured: 2 ms · 1 row read
+    dictGet('payflow_inventory.dict_deployment', 'change_id', 'payment', pf_at('14:15'))                            AS change_at_14h15;
+-- Measured: 3 ms · 2 rows read
 -- What to look for: from a pod name alone, the deployment, its version, its node and
 -- zone, the owning team, and the change that was live at 14:15 (CHG-4117).
 
 
--- STEP 9 · Checkpoint
+-- STEP 10 · Checkpoint
 SELECT
     if((SELECT count() FROM payflow_inventory.node) = 12, 'OK', 'KO')                         AS nodes,
     if((SELECT count() FROM payflow_inventory.service) = 9, 'OK', 'KO')                       AS services,
-    if((SELECT count() FROM payflow_inventory.deployment_history) = 11, 'OK', 'KO')           AS history,
-    if((SELECT count() FROM payflow_inventory.pod) = 49, 'OK', 'KO')                          AS pods,
-    if((SELECT node_name FROM payflow_inventory.pod WHERE deployment = 'fraud-scoring' AND slot = 2) = 'ip-10-0-3-17', 'OK', 'KO') AS fraud_pod_node,
+    if(toDayOfWeek(pf_black_friday()) = 5 AND pf_black_friday() < today(), 'OK', 'KO')       AS calendar,
+    if((SELECT count() FROM payflow_inventory.deployment_history) = 16, 'OK', 'KO')           AS history,
+    if((SELECT count() FROM payflow_inventory.pod) = 74, 'OK', 'KO')                          AS pods,
+    if((SELECT groupUniqArray(node_name) FROM payflow_inventory.pod WHERE deployment = 'fraud-scoring' AND slot = 2) = ['ip-10-0-3-17'], 'OK', 'KO') AS fraud_pod_node,
     if((SELECT count() FROM payflow_inventory.merchant) = 20000, 'OK', 'KO')                  AS merchants,
-    if(dictGet('payflow_inventory.dict_deployment', 'change_id', 'payment', toDateTime('2026-11-27 14:15:00', 'UTC')) = 'CHG-4117', 'OK', 'KO') AS dictionaries
+    if(dictGet('payflow_inventory.dict_deployment', 'change_id', 'payment', pf_at('14:15')) = 'CHG-4117', 'OK', 'KO') AS dictionaries
 SETTINGS select_sequential_consistency = 1;   -- read the latest version, whatever the replica
--- Measured: 69 ms · 55 rows read
+-- Measured: 51 ms · 81 rows read

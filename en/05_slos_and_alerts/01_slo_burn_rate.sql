@@ -52,9 +52,9 @@ SYSTEM WAIT VIEW payflow_sre.rmv_slo_burn;   -- wait for the first refresh befor
 
 SELECT minute, requests, errors, round(burn_5m, 1) AS burn_5m, round(burn_1h, 1) AS burn_1h, fast_burn
 FROM payflow_sre.slo_burn
-WHERE route = 'POST /v1/payments' AND minute BETWEEN '2026-11-27 13:56:00' AND '2026-11-27 14:06:00'
+WHERE route = 'POST /v1/payments' AND minute BETWEEN pf_at('13:56') AND pf_at('14:06')
 ORDER BY minute;
--- Measured: 16 ms · 5,760 rows read (208.7 KB)
+-- Measured: 17 ms · 8,193 rows read (243.2 KB)
 -- What to look for: the 5 min window crosses 14.4 at 13:58, the 1 h window a little
 -- later. The alert fires when both are above: detection time, in minutes.
 
@@ -63,7 +63,8 @@ ORDER BY minute;
 --  Four rules, one table. Each rule produces FIRING when its condition becomes
 --  true and RESOLVED when it stops (lagInFrame compares a minute with the previous one).
 --    · SLO fast burn on a gateway route
---    · p99 latency of payment.AuthorizePayment above 1 s for 3 minutes in a row
+--    · p99 latency of payment.AuthorizePayment above 1 s for 3 minutes in a row, with at
+--      least 150 calls a minute: below that, a p99 is only the slowest call
 --    · a container restarted (counter k8s.container.restarts went up)
 --    · a node reports memory pressure (Kubernetes event)
 CREATE OR REPLACE TABLE payflow_sre.alerts
@@ -95,17 +96,18 @@ FROM
 
     UNION ALL
 
-    -- rule 2: p99 above 1 s for 3 consecutive minutes
+    -- rule 2: p99 above 1 s for 3 consecutive minutes, on enough calls
     SELECT minute, 'p99_latency', 'ticket', 'payment', if(slow3, 'FIRING', 'RESOLVED'),
            concat('payment.AuthorizePayment p99 = ', toString(round(p99_ms)), ' ms'),
            slow3 != lagInFrame(slow3, 1, false) OVER (ORDER BY minute)
     FROM
     (
         SELECT minute, p99_ms,
-               min(p99_ms) OVER (ORDER BY minute ROWS BETWEEN 2 PRECEDING AND CURRENT ROW) > 1000 AS slow3
+               min(p99_ms) OVER (ORDER BY minute ROWS BETWEEN 2 PRECEDING AND CURRENT ROW) > 1000
+               AND min(calls) OVER (ORDER BY minute ROWS BETWEEN 2 PRECEDING AND CURRENT ROW) >= 150 AS slow3
         FROM
         (
-            SELECT minute, quantilesTDigestMerge(0.5, 0.95, 0.99)(latency)[3] / 1e6 AS p99_ms
+            SELECT minute, quantilesTDigestMerge(0.5, 0.95, 0.99)(latency)[3] / 1e6 AS p99_ms, sum(requests) AS calls
             FROM payflow_sre.red_1m
             WHERE service = 'payment' AND operation = 'payment.AuthorizePayment'
             GROUP BY minute
@@ -118,7 +120,7 @@ FROM
     SELECT toDateTime(TimeUnix), 'container_restart', 'ticket', ServiceName, 'FIRING',
            concat(ResourceAttributes['k8s.pod.name'], ' restarted on ', ResourceAttributes['k8s.node.name']),
            Value > lagInFrame(Value, 1, Value) OVER (PARTITION BY ResourceAttributes['k8s.pod.name'] ORDER BY TimeUnix)
-    FROM payflow_otel.otel_metrics_sum
+    FROM payflow_otel.otel_metrics_gauge
     WHERE MetricName = 'k8s.container.restarts'
 
     UNION ALL
@@ -136,23 +138,23 @@ SYSTEM WAIT VIEW payflow_sre.rmv_alerts;
 SELECT ts, rule, severity, service, state, summary
 FROM payflow_sre.alerts
 ORDER BY ts;
--- Measured: 30 ms · 11 rows read (1 KB)
--- What to look for: the whole incident in a dozen lines. The first page, the
--- latency ticket, the node memory pressure, the OOM restart, then the RESOLVED lines.
+-- Measured: 24 ms · 11 rows read (1 KB)
+-- What to look for: a month of alerts in a dozen lines, all on Black Friday. The first
+-- page, the latency ticket, the node memory pressure, the OOM restart, then RESOLVED.
 
 
 -- STEP 3 · Mean time to detect
 SELECT
-    toDateTime('2026-11-27 13:58:00', 'UTC')                                                  AS deployed,
+    pf_at('13:58')                                                  AS deployed,
     (SELECT min(ts) FROM payflow_sre.alerts WHERE rule = 'slo_fast_burn' AND state = 'FIRING') AS first_page,
     dateDiff('minute', deployed, first_page)                                                   AS minutes_to_detect;
--- Measured: 3 ms · 12 rows read
+-- Measured: 7 ms · 13 rows read
 
 
 -- STEP 4 · Checkpoint
 SELECT
     if((SELECT count() FROM payflow_sre.alerts WHERE rule = 'slo_fast_burn' AND state = 'FIRING') >= 1, 'OK', 'KO') AS page_fired,
     if((SELECT count() FROM payflow_sre.alerts WHERE rule = 'container_restart') = 1, 'OK', 'KO')                    AS restart_alert,
-    if((SELECT max(ts) FROM payflow_sre.alerts WHERE rule = 'slo_fast_burn' AND state = 'RESOLVED') > '2026-11-27 14:40:00', 'OK', 'KO') AS resolved
+    if((SELECT max(ts) FROM payflow_sre.alerts WHERE rule = 'slo_fast_burn' AND state = 'RESOLVED') > pf_at('14:40'), 'OK', 'KO') AS resolved
 SETTINGS select_sequential_consistency = 1;
--- Measured: 14 ms · 34 rows read
+-- Measured: 83 ms · 35 rows read

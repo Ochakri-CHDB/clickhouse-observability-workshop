@@ -22,7 +22,7 @@ SELECT number FROM numbers(5);
 --  Cada línea recibe un nivel, un servicio y una duración, derivados del número de
 --  línea con cityHash64 (determinista: todos obtienen las mismas líneas).
 SELECT
-    toDateTime('2026-11-27 00:00:00', 'UTC') + intDiv(number, 12)                                   AS ts,
+    toDateTime(today() - 1, 'UTC') + intDiv(number, 12)                                             AS ts,
     ['api-gateway', 'checkout', 'payment', 'fraud-scoring'][1 + cityHash64(number, 's') % 4]          AS service,
     multiIf(cityHash64(number, 'l') % 1000 < 5, 'ERROR', cityHash64(number, 'l') % 1000 < 40, 'WARN', 'INFO') AS level,
     concat('request ', toString(number), ' served in ', toString(5 + cityHash64(number, 'd') % 300), ' ms') AS message
@@ -47,7 +47,7 @@ FROM
 )
 GROUP BY service, level
 ORDER BY service, level;
--- Medido: 341 ms · 1 M filas leídas (7,6 MB)
+-- Medido: 349 ms · 1 M filas leídas (7,6 MB)
 -- Qué observar: un millón de líneas generadas, parseadas con una expresión regular
 -- y agregadas, en unos cientos de milisegundos. Prueba con numbers(10000000).
 

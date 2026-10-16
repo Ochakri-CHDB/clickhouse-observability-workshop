@@ -8,7 +8,7 @@
 --  for heavy processing: a landing table with the Null engine (it stores nothing),
 --  and materialized views that process every inserted block on its way to the
 --  OpenTelemetry tables. Each view plays one or several processors:
---    · filter        drop the kubelet health checks (noise, ~4% of the volume)
+--    · filter        drop the kubelet health checks (noise, a share of the volume)
 --    · transform     parse 4 log formats: severity, trace id, message, attributes
 --    · k8sattributes add deployment, version, node, zone and team from the pod name
 --    · redaction     mask card numbers; the Null table means no raw line is ever stored
@@ -96,12 +96,12 @@ SELECT
 FROM
 (
     SELECT JSONExtractString(payload, 'log') AS line
-    FROM payflow_sim.raw_records(from_s = 51000, to_s = 51001)
+    FROM payflow_sim.raw_records(from_t = pf_at('14:10:00'), to_t = pf_at('14:10:01'))
     WHERE source = 'filelog' AND payload NOT LIKE '%health%'
     LIMIT 1 BY splitByChar('/', JSONExtractString(payload, 'log.file.path'))[6], pf_log_severity(JSONExtractString(payload, 'log'))
 )
 FORMAT Vertical;
--- Measured: 731 ms · 198 rows read (8.3 KB)
+-- Measured: 643 ms · 225 rows read (12.8 KB) · 60.6 MB memory
 -- What to look for: one line per service and severity. Five formats in, one model out.
 
 --  k8sattributes: the agent only knows the file path. The gateway parses it, then asks
@@ -178,7 +178,17 @@ SELECT
         'k8s.event.type', JSONExtractString(payload, 'type'),
         'k8s.object.kind', JSONExtractString(payload, 'involvedObject', 'kind'),
         'k8s.object.name', JSONExtractString(payload, 'involvedObject', 'name'),
-        'k8s.event.source', JSONExtractString(payload, 'source', 'component'))    AS LogAttributes,
+        'k8s.event.source', JSONExtractString(payload, 'source', 'component'),
+        -- what ClickStack's Pod Timeline reads: the event as the events.k8s.io API returns it
+        'k8s.resource.name', 'events',
+        'object', toJSONString(CAST((
+            tuple(JSONExtractString(payload, 'firstTimestamp')),
+            JSONExtractString(payload, 'reason'), JSONExtractString(payload, 'message'), JSONExtractString(payload, 'type'),
+            (JSONExtractString(payload, 'involvedObject', 'kind'), JSONExtractString(payload, 'involvedObject', 'name'),
+             JSONExtractString(payload, 'involvedObject', 'namespace'),
+             dictGetOrDefault('payflow_inventory.dict_pod', 'pod_uid', JSONExtractString(payload, 'involvedObject', 'name'), ''))),
+            'Tuple(metadata Tuple(creationTimestamp String), reason String, note String, type String, regarding Tuple(kind String, name String, namespace String, uid String))')))
+                                                                              AS LogAttributes,
     JSONExtractString(payload, 'reason')                                      AS EventName
 FROM payflow_ingest.agent_records
 WHERE source = 'k8sobjects';
@@ -210,21 +220,31 @@ FROM payflow_ingest.agent_records
 GROUP BY minute, service, severity, dropped;
 
 
--- STEP 4 · The agents send the day, through the gateway
---  6 batches of 4 hours. Each INSERT runs the simulator, then the 3 views: parsing,
---  enrichment and masking happen in the same statement, under the 60 s of the console.
-INSERT INTO payflow_ingest.agent_records SELECT * FROM payflow_sim.raw_records(from_s = 0, to_s = 14400);       -- 00:00 to 04:00
--- Measured: 11.8 s · 2 M rows read (737.4 MB) · 1.3 M rows written · 2.5 GB memory
-INSERT INTO payflow_ingest.agent_records SELECT * FROM payflow_sim.raw_records(from_s = 14400, to_s = 28800);   -- 04:00 to 08:00
--- Measured: 11.6 s · 2.1 M rows read (748.9 MB) · 1.3 M rows written · 2.6 GB memory
-INSERT INTO payflow_ingest.agent_records SELECT * FROM payflow_sim.raw_records(from_s = 28800, to_s = 43200);   -- 08:00 to 12:00
--- Measured: 12.7 s · 2.4 M rows read (866.2 MB) · 1.5 M rows written · 2.7 GB memory
-INSERT INTO payflow_ingest.agent_records SELECT * FROM payflow_sim.raw_records(from_s = 43200, to_s = 57600);   -- 12:00 to 16:00
--- Measured: 14.8 s · 4.7 M rows read (1.7 GB) · 3 M rows written · 4.8 GB memory
-INSERT INTO payflow_ingest.agent_records SELECT * FROM payflow_sim.raw_records(from_s = 57600, to_s = 72000);   -- 16:00 to 20:00
--- Measured: 16.1 s · 7 M rows read (2.5 GB) · 4.6 M rows written · 7.3 GB memory
-INSERT INTO payflow_ingest.agent_records SELECT * FROM payflow_sim.raw_records(from_s = 72000, to_s = 86400);   -- 20:00 to 24:00
--- Measured: 16.1 s · 6.4 M rows read (2.3 GB) · 4.2 M rows written · 6.7 GB memory
+-- STEP 4 · The agents send the month, through the gateway
+--  Each INSERT runs the simulator, then the 3 views: parsing, enrichment and masking
+--  happen in the same statement, under the 60 s of the console. The ordinary days go
+--  by batches of 4 or 5 days; Black Friday, twelve times busier, by thirds of a day.
+INSERT INTO payflow_ingest.agent_records SELECT * FROM payflow_sim.raw_records(from_t = pf_day(-29), to_t = pf_day(-25));
+-- Measured: 18.7 s · 8.1 M rows read (2.7 GB) · 4.8 M rows written · 5.8 GB memory
+INSERT INTO payflow_ingest.agent_records SELECT * FROM payflow_sim.raw_records(from_t = pf_day(-25), to_t = pf_day(-21));
+-- Measured: 20 s · 9 M rows read (3 GB) · 5.4 M rows written · 7.7 GB memory
+INSERT INTO payflow_ingest.agent_records SELECT * FROM payflow_sim.raw_records(from_t = pf_day(-21), to_t = pf_day(-17));
+-- Measured: 17.7 s · 8 M rows read (2.7 GB) · 4.8 M rows written · 6.1 GB memory
+INSERT INTO payflow_ingest.agent_records SELECT * FROM payflow_sim.raw_records(from_t = pf_day(-17), to_t = pf_day(-13));
+-- Measured: 19.4 s · 9 M rows read (3 GB) · 5.4 M rows written · 7.6 GB memory
+INSERT INTO payflow_ingest.agent_records SELECT * FROM payflow_sim.raw_records(from_t = pf_day(-13), to_t = pf_day(-9));
+-- Measured: 18 s · 8 M rows read (2.7 GB) · 4.8 M rows written · 5.8 GB memory
+INSERT INTO payflow_ingest.agent_records SELECT * FROM payflow_sim.raw_records(from_t = pf_day(-9), to_t = pf_day(-5));
+-- Measured: 17.5 s · 8.5 M rows read (2.9 GB) · 5.1 M rows written · 5.8 GB memory
+INSERT INTO payflow_ingest.agent_records SELECT * FROM payflow_sim.raw_records(from_t = pf_day(-5), to_t = pf_day(0));
+-- Measured: 19.6 s · 10.8 M rows read (3.6 GB) · 6.5 M rows written · 9 GB memory
+--  Black Friday
+INSERT INTO payflow_ingest.agent_records SELECT * FROM payflow_sim.raw_records(from_t = pf_at('00:00'), to_t = pf_at('10:00'));
+-- Measured: 14.1 s · 4.9 M rows read (1.8 GB) · 3.2 M rows written · 4.8 GB memory
+INSERT INTO payflow_ingest.agent_records SELECT * FROM payflow_sim.raw_records(from_t = pf_at('10:00'), to_t = pf_at('17:00'));
+-- Measured: 15.7 s · 7.3 M rows read (2.6 GB) · 4.8 M rows written · 6.8 GB memory
+INSERT INTO payflow_ingest.agent_records SELECT * FROM payflow_sim.raw_records(from_t = pf_at('17:00'), to_t = pf_day(1));
+-- Measured: 20.5 s · 11.7 M rows read (4.3 GB) · 7.7 M rows written · 10.7 GB memory
 
 SELECT count() AS records_in_landing_table FROM payflow_ingest.agent_records;
 -- Measured: 2 ms
@@ -238,15 +258,15 @@ SELECT
     round(100 * sumIf(records, dropped) / sum(records), 1)          AS dropped_pct,
     formatReadableSize(sumIf(bytes, dropped))                       AS bytes_saved
 FROM payflow_sre.log_volume_1m;
--- Measured: 4 ms · 30,440 rows read (505.4 KB)
+-- Measured: 54 ms · 822,544 rows read (13.3 MB)
 
 SELECT ServiceName, ResourceAttributes['service.version'] AS version, ResourceAttributes['service.team'] AS team,
        ResourceAttributes['cloud.availability_zone'] AS zone, count() AS log_records
 FROM payflow_otel.otel_logs
-WHERE ServiceName = 'payment' AND Timestamp BETWEEN '2026-11-27 14:00:00' AND '2026-11-27 14:05:00'
+WHERE ServiceName = 'payment' AND Timestamp BETWEEN pf_at('14:00') AND pf_at('14:05')
 GROUP BY ALL
 ORDER BY log_records DESC;
--- Measured: 166 ms · 2.2 M rows read (14.9 MB) · 103.2 MB memory
+-- Measured: 29 ms · 502,877 rows read (3.8 MB)
 -- What to look for: the agent only sent a file path. Version, team and zone were added
 -- by the gateway. During the rollout, both versions log side by side.
 
@@ -256,7 +276,7 @@ SELECT
     any(if(Body LIKE '%pan=%', Body, NULL))           AS example
 FROM payflow_otel.otel_logs
 WHERE ServiceName = 'card-network-adapter';
--- Measured: 253 ms · 4.5 M rows read (251.2 MB) · 92.7 MB memory
+-- Measured: 376 ms · 20.7 M rows read (1.3 GB) · 324.2 MB memory
 -- What to look for: zero full card number stored, every one masked.
 
 
@@ -268,4 +288,4 @@ SELECT
     if((SELECT countIf(ResourceAttributes['service.team'] = '' AND ServiceName != 'k8s-events') FROM payflow_otel.otel_logs) = 0, 'OK', 'KO') AS enrichment,
     if((SELECT countIf(TraceId != '') / count() FROM payflow_otel.otel_logs) > 0.9, 'OK', 'KO')                  AS trace_ids
 SETTINGS select_sequential_consistency = 1;
--- Measured: 542 ms · 23.5 M rows read (823.6 MB) · 152.3 MB memory
+-- Measured: 1.32 s · 73.8 M rows read (2.5 GB) · 324.3 MB memory
